@@ -2,7 +2,7 @@
 
 End-to-end CCTV-to-retail-analytics system with separate agents for input, frame analysis, event generation, event memory, timestamp queries, APIs, and dashboard output.
 
-![Dashboard homepage](docs/assets/dashboard-home.png)
+![Dashboard homepage](docs/assets/home.png)
 
 ## What It Does
 
