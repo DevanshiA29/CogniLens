@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -10,7 +12,8 @@ def create_demo_video(path: str | Path, duration_sec: int = 8, fps: int = 10) ->
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     width, height = 960, 540
-    writer = _open_browser_video_writer(output, fps, (width, height))
+    raw_output = output.with_suffix(".avi")
+    writer = _open_mjpeg_writer(raw_output, fps, (width, height))
     total_frames = duration_sec * fps
     for frame_index in range(total_frames):
         t = frame_index / max(total_frames - 1, 1)
@@ -35,7 +38,49 @@ def create_demo_video(path: str | Path, duration_sec: int = 8, fps: int = 10) ->
         cv2.circle(frame, (862, 125), 24, (235, 125, 125), -1)
         writer.write(frame)
     writer.release()
+    if not _transcode_to_browser_mp4(raw_output, output):
+        logging.warning("demo_video.transcode_failed_using_opencv_fallback", extra={"output": str(output)})
+        writer = _open_browser_video_writer(output, fps, (width, height))
+        capture = cv2.VideoCapture(str(raw_output))
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            writer.write(frame)
+        capture.release()
+        writer.release()
+    raw_output.unlink(missing_ok=True)
     return output
+
+
+def _open_mjpeg_writer(output: Path, fps: int, size: tuple[int, int]) -> cv2.VideoWriter:
+    writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"MJPG"), fps, size)
+    if not writer.isOpened():
+        raise ValueError(f"Unable to create raw demo video: {output}")
+    return writer
+
+
+def _transcode_to_browser_mp4(source: Path, output: Path) -> bool:
+    command = [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True)
+        return output.exists() and output.stat().st_size > 0
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
 
 
 def _open_browser_video_writer(output: Path, fps: int, size: tuple[int, int]) -> cv2.VideoWriter:

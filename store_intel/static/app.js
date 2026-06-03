@@ -18,6 +18,7 @@ const scoreTotal = document.querySelector("#scoreTotal");
 const scoreBreakdown = document.querySelector("#scoreBreakdown");
 const scoreLabel = document.querySelector("#scoreLabel");
 const scoreEvidence = document.querySelector("#scoreEvidence");
+const systemStatus = document.querySelector("#systemStatus");
 const videoStage = document.querySelector("#videoStage");
 const debugMeta = document.querySelector("#debugMeta");
 const overlayCanvas = document.querySelector("#retailOverlayCanvas");
@@ -25,6 +26,8 @@ const overlayCtx = overlayCanvas.getContext("2d");
 const overlayBadges = document.querySelector("#overlayBadges");
 const overlayTooltip = document.querySelector("#overlayTooltip");
 const journeyReplay = document.querySelector("#journeyReplay");
+const toggleVideoPlayback = document.querySelector("#toggleVideoPlayback");
+const downloadInsights = document.querySelector("#downloadInsights");
 let timelineStart = null;
 let hasProcessedInput = false;
 let timelineRequestId = 0;
@@ -110,13 +113,120 @@ function queueRiskScore(metrics) {
 
 function revenueOpportunity(metrics, funnel) {
   const visitors = Number(metrics.unique_visitors || 0);
-  const checkout = Number(funnel?.checkout_visit || 0);
+  const checkout = Number(funnel?.checkout_visit ?? funnel?.billing_queue_join ?? 0);
   const missed = Math.max(visitors - checkout, 0);
-  return missed * 450;
+  const dwellValues = Object.values(metrics.average_dwell_ms_by_zone || {}).map((value) => Number(value || 0));
+  const avgDwellSec = dwellValues.length ? dwellValues.reduce((sum, value) => sum + value, 0) / dwellValues.length / 1000 : 0;
+  const productSignals = Number(funnel?.product_interaction || 0) + Number(funnel?.visited_product_zone || funnel?.zone_enter || 0);
+  const engagement = engagementScore(metrics);
+  const queuePenalty = Math.min(180, Number(metrics.queue_depth || 0) * 28 + Number(metrics.abandonment_rate || 0) * 150);
+  const basketEstimate = 240 + Math.min(620, engagement * 3.8 + avgDwellSec * 16 + productSignals * 34);
+  return Math.round(missed * Math.max(120, basketEstimate - queuePenalty));
 }
 
 function money(value) {
   return `₹${Math.round(value).toLocaleString("en-IN")}`;
+}
+
+function setSystemStatus(text, state = "ready") {
+  if (!systemStatus) return;
+  systemStatus.textContent = "";
+  const dot = document.createElement("span");
+  systemStatus.append(dot, document.createTextNode(` ${text}`));
+  systemStatus.dataset.state = state;
+}
+
+function csvEscape(value) {
+  const text = value === undefined || value === null ? "" : String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function csvRow(values) {
+  return values.map(csvEscape).join(",");
+}
+
+function buildInsightsCsv() {
+  const rows = [
+    ["section", "metric", "value", "detail"],
+    ["Project", "System", "CogniLens", "Agentic CCTV store intelligence"],
+    ["Project", "Store", storeId(), ""],
+    ["Project", "Selected Timestamp", selectedTime.textContent || "", `Video second ${slider.value || 0}`],
+  ];
+
+  if (currentMetrics) {
+    const engagement = engagementScore(currentMetrics);
+    const queueRisk = queueRiskScore(currentMetrics);
+    rows.push(["KPI", "Total Visitors", currentMetrics.unique_visitors ?? 0, "Staff excluded from customer metrics"]);
+    rows.push(["KPI", "Conversion Rate", percent(currentMetrics.conversion_rate), "Visitors reaching checkout"]);
+    rows.push(["KPI", "Customer Engagement Score", `${engagement}/100`, "Derived from observed engagement time"]);
+    rows.push(["KPI", "Queue Risk Score", `${queueRisk}/100`, "Higher score means greater checkout risk"]);
+    rows.push(["KPI", "Estimated Revenue Opportunity", money(revenueOpportunity(currentMetrics, currentFunnel)), "Dynamic estimate from missed checkout and engagement signals"]);
+    rows.push(["KPI", "Store Health Score", `${currentScore?.total ? Math.round(currentScore.total) : Math.max(0, 100 - queueRisk)}/100`, "Rubric and operating readiness signal"]);
+    for (const [zone, dwellMs] of Object.entries(currentMetrics.average_dwell_ms_by_zone || {})) {
+      rows.push(["Area", zoneLabel(zone), `${Math.round(Number(dwellMs || 0) / 1000)} sec`, "Average customer engagement time"]);
+    }
+  }
+
+  if (currentFunnel) {
+    const steps = currentFunnel.flow || [
+      { label: "Entered Store", count: currentFunnel.entry },
+      { label: "Visited Product Zone", count: currentFunnel.zone_enter },
+      { label: "Product Interaction", count: currentFunnel.product_interaction },
+      { label: "Billing Counter", count: currentFunnel.billing_queue_join },
+      { label: "Exit", count: currentFunnel.exit },
+    ];
+    for (const step of steps) rows.push(["Funnel", step.label, step.count ?? 0, "Session-based journey count"]);
+    for (const item of currentFunnel.attention_scores || []) rows.push(["Attention", item.visitor, item.attention_score, "Purchase intent score"]);
+  }
+
+  if (currentTimelineData) {
+    rows.push(["Timeline", "Summary", currentTimelineData.summary || "", currentTimelineData.timestamp || ""]);
+    for (const event of currentTimelineData.display_events || []) {
+      rows.push(["Activity", businessActivityHeadline(event), event.visitor || "", zoneLabel(event.zone)]);
+    }
+  }
+
+  for (const item of currentAnomalies || []) {
+    const proof = item.proof || {};
+    const proofText = [
+      proof.timestamp ? `timestamp ${proof.timestamp}` : "",
+      proof.zone ? `area ${zoneLabel(proof.zone)}` : "",
+      proof.measured_value !== undefined && proof.threshold !== undefined ? `observed ${proof.measured_value} ${proof.unit || ""}, expected ${proof.threshold}` : "",
+    ].filter(Boolean).join("; ");
+    rows.push(["AI Insight", humanizeType(item.anomaly_type), item.message, proofText]);
+  }
+
+  if (currentScore) {
+    rows.push(["Rubric", "Total Score", `${Math.round(currentScore.total)}/100`, currentScore.label || "Self-evaluation based on rubric"]);
+    rows.push(["Rubric", "Detection", `${Number(currentScore.detection || 0).toFixed(1)}/30`, ""]);
+    rows.push(["Rubric", "API", `${Number(currentScore.api || 0).toFixed(1)}/35`, ""]);
+    rows.push(["Rubric", "Production", `${Number(currentScore.production || 0).toFixed(1)}/20`, ""]);
+    rows.push(["Rubric", "Thinking", `${Number(currentScore.thinking || 0).toFixed(1)}/15`, ""]);
+  }
+
+  return `${rows.map(csvRow).join("\n")}\n`;
+}
+
+function downloadInsightsCsv() {
+  if (!hasProcessedInput) return;
+  const csv = buildInsightsCsv();
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const safeStore = storeId().replace(/[^a-z0-9_-]+/gi, "_");
+  link.href = url;
+  link.download = `cognilens-insights-${safeStore}-${new Date().toISOString().slice(0, 19).replaceAll(":", "-")}.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function setVideoPlaybackButton() {
+  if (!toggleVideoPlayback) return;
+  const hasSource = Boolean(videoPreview.currentSrc || videoPreview.src);
+  toggleVideoPlayback.disabled = !hasSource;
+  toggleVideoPlayback.textContent = videoPreview.paused ? "Play Preview" : "Pause Preview";
 }
 
 function humanizeType(value) {
@@ -463,7 +573,9 @@ async function refreshVideoPreview() {
       const duration = Number.isFinite(videoPreview.duration) ? Math.floor(videoPreview.duration) : data.duration_sec;
       slider.max = Math.max(Number(slider.max), duration);
       syncVideoToSlider();
+      setVideoPlaybackButton();
     };
+    setVideoPlaybackButton();
   } catch {
     videoPreview.removeAttribute("src");
     videoPreview.removeAttribute("poster");
@@ -473,6 +585,7 @@ async function refreshVideoPreview() {
     currentVideoSourceSize = null;
     videoMeta.textContent = "No video loaded";
     debugMeta.textContent = "No internal metadata available.";
+    setVideoPlaybackButton();
   }
 }
 
@@ -816,7 +929,8 @@ async function refreshAll() {
     return;
   }
   await refreshTimelineRange();
-  await Promise.all([refreshMetrics(), refreshTimeline(), refreshFunnel(), refreshAnomalies(), refreshVideoPreview(), refreshAgentScore()]);
+  await Promise.all([refreshFunnel(), refreshAnomalies(), refreshVideoPreview(), refreshAgentScore()]);
+  await Promise.all([refreshMetrics(), refreshTimeline()]);
 }
 
 function resetDashboard() {
@@ -858,6 +972,7 @@ function resetDashboard() {
   videoPreview.removeAttribute("src");
   videoPreview.removeAttribute("poster");
   videoPreview.onloadedmetadata = null;
+  videoPreview.load();
   currentVideoFrameUrl = null;
   currentVideoCacheKey = null;
   currentVideoSourceSize = null;
@@ -867,6 +982,9 @@ function resetDashboard() {
   overlayTooltip.hidden = true;
   journeyReplay.hidden = true;
   journeyReplay.innerHTML = "";
+  setSystemStatus("Ready for analysis", "ready");
+  if (downloadInsights) downloadInsights.disabled = true;
+  setVideoPlaybackButton();
   renderOverlay();
 }
 
@@ -878,12 +996,14 @@ function showDashboard() {
   lowerEl.hidden = false;
   scorePanel.hidden = false;
   emptyState.hidden = true;
+  if (downloadInsights) downloadInsights.disabled = false;
   startOverlayAnimation();
 }
 
 document.querySelector("#runDemo").addEventListener("click", async () => {
   showDashboard();
   summary.textContent = "Generating and processing sample CCTV footage...";
+  setSystemStatus("Processing demo video", "working");
   await getJson("/demo/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -891,6 +1011,7 @@ document.querySelector("#runDemo").addEventListener("click", async () => {
   });
   uploadStatus.textContent = "Demo video processed. Use this when you want sample data without uploading your own MP4.";
   await refreshAll();
+  setSystemStatus("Insights live", "live");
 });
 
 videoUpload.addEventListener("change", () => {
@@ -913,6 +1034,7 @@ processUpload.addEventListener("click", async () => {
   showDashboard();
   processUpload.disabled = true;
   uploadStatus.textContent = "Processing video through input, analyzer, event, memory, and API agents...";
+  setSystemStatus("Processing uploaded video", "working");
   try {
     const result = await getJson("/videos/upload", {
       method: "POST",
@@ -920,6 +1042,7 @@ processUpload.addEventListener("click", async () => {
     });
     uploadStatus.textContent = `${result.events_inserted} events processed from ${result.input.duration_sec}s of video.`;
     await refreshAll();
+    setSystemStatus("Insights live", "live");
   } catch (error) {
     uploadStatus.textContent = error.message;
     resetDashboard();
@@ -942,6 +1065,21 @@ videoPreview.addEventListener("seeked", () => {
   syncSliderToVideo();
 });
 videoPreview.addEventListener("timeupdate", () => syncSliderToVideo());
+videoPreview.addEventListener("play", setVideoPlaybackButton);
+videoPreview.addEventListener("pause", setVideoPlaybackButton);
+videoPreview.addEventListener("loadedmetadata", setVideoPlaybackButton);
+toggleVideoPlayback?.addEventListener("click", async () => {
+  if (!videoPreview.currentSrc && !videoPreview.src) return;
+  try {
+    if (videoPreview.paused) await videoPreview.play();
+    else videoPreview.pause();
+  } catch (error) {
+    summary.textContent = `Video preview could not start automatically. Use the native play control. ${error.message}`;
+  } finally {
+    setVideoPlaybackButton();
+  }
+});
+downloadInsights?.addEventListener("click", downloadInsightsCsv);
 document.querySelectorAll("[data-overlay-toggle]").forEach((toggle) => {
   toggle.addEventListener("change", () => {
     overlayOptions[toggle.dataset.overlayToggle] = toggle.checked;

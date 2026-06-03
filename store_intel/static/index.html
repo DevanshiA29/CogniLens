@@ -3,17 +3,26 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agentic Store Intelligence</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260602-4" />
+    <title>CogniLens</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260603-polish" />
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <h1>Agentic Store Intelligence</h1>
-        <p>Live CCTV-to-events retail analytics</p>
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">
+          <span class="mark-monogram">CL</span>
+          <span class="mark-scan"></span>
+        </div>
+        <div>
+          <div class="brand-kicker">Retail Vision Intelligence</div>
+          <h1>CogniLens</h1>
+          <p>Live CCTV-to-business insight analytics</p>
+        </div>
       </div>
       <div class="actions">
+        <span id="systemStatus" class="status-pill"><span></span> Ready for analysis</span>
         <input id="storeId" value="STORE_BLR_002" />
+        <button id="downloadInsights" class="secondary-action" disabled>Download Insights CSV</button>
         <button id="runDemo" title="Generate sample CCTV and process it when you do not have an MP4 ready">Use Demo Video</button>
       </div>
     </header>
@@ -21,6 +30,7 @@
     <main>
       <section class="upload-panel">
         <div>
+          <span class="section-eyebrow">Start Analysis</span>
           <h2>Upload CCTV MP4</h2>
           <p id="uploadStatus">Select a store camera clip and process it through the analytics agents.</p>
         </div>
@@ -39,8 +49,15 @@
       </section>
 
       <section id="emptyState" class="empty-state">
+        <div class="empty-orbit" aria-hidden="true"></div>
         <h2>No Video Processed</h2>
         <p>Upload an MP4 or click Use Demo Video to run the agents and display verified analytics.</p>
+        <div class="capability-strip" aria-label="System capabilities">
+          <span>Visitor Identity</span>
+          <span>Staff Filtering</span>
+          <span>Journey Replay</span>
+          <span>AI Alerts</span>
+        </div>
       </section>
 
       <section id="scorePanel" class="score-panel" hidden>
@@ -56,9 +73,25 @@
 
       <section class="workspace" hidden>
         <div class="video-panel">
-          <div class="panel-head">
+          <div class="panel-head video-head">
             <h2>Video Preview</h2>
-            <span id="videoMeta">No video loaded</span>
+            <div class="video-actions">
+              <button id="toggleVideoPlayback" class="secondary-action" disabled>Play Preview</button>
+              <span id="videoMeta">No video loaded</span>
+            </div>
+          </div>
+          <div class="video-timeline-control">
+            <div class="timeline-title">
+              <strong>Timestamp Control</strong>
+              <time id="selectedTime">--</time>
+            </div>
+            <div class="timeline-ruler" aria-hidden="true">
+              <span>Entry</span>
+              <span>Browse</span>
+              <span>Checkout</span>
+            </div>
+            <input id="slider" type="range" min="0" max="20" value="0" />
+            <p id="summary" class="summary">Move the slider or run the demo.</p>
           </div>
           <div id="videoStage" class="video-stage">
             <video id="videoPreview" controls muted playsinline preload="metadata"></video>
@@ -84,10 +117,8 @@
         <div class="timeline">
           <div class="panel-head">
             <h2>Customer Activity Timeline</h2>
-            <time id="selectedTime">2026-03-03T14:22:10Z</time>
+            <span>Per-second activity</span>
           </div>
-          <input id="slider" type="range" min="0" max="20" value="0" />
-          <p id="summary" class="summary">Move the slider or run the demo.</p>
           <div id="events" class="events"></div>
         </div>
 
@@ -114,6 +145,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260602-4"></script>
+    <script src="/static/app.js?v=20260603-polish"></script>
   </body>
 </html>
