@@ -9,6 +9,7 @@ services:
       - store_intel_uploads:/app/uploads
     environment:
       STORE_INTEL_DB_PATH: /app/data/store_intel.db
+      STORE_INTEL_UPLOAD_DIR: /app/uploads
       STORE_INTEL_USE_YOLO: "0"
     healthcheck:
       test:

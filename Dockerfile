@@ -2,7 +2,9 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8000
 ENV STORE_INTEL_DB_PATH=/app/data/store_intel.db
+ENV STORE_INTEL_UPLOAD_DIR=/app/uploads
 ENV STORE_INTEL_USE_YOLO=0
 
 WORKDIR /app
@@ -23,11 +25,11 @@ RUN pip install --no-cache-dir -e .
 
 COPY samples ./samples
 
-RUN mkdir -p /app/data /app/uploads /app/samples
+RUN mkdir -p /app/data /app/uploads /app/runtime/data /app/runtime/uploads /app/samples
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3).read()" || exit 1
+  CMD python -c "import os; from urllib.request import urlopen; urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\", \"8000\")}/health', timeout=3).read()" || exit 1
 
-CMD ["uvicorn", "store_intel.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn store_intel.api.app:app --host 0.0.0.0 --port ${PORT:-8000}"]

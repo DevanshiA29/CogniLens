@@ -1,0 +1,20 @@
+services:
+  - type: web
+    runtime: docker
+    name: agentic-store-intelligence
+    plan: starter
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: STORE_INTEL_DB_PATH
+        value: /app/runtime/data/store_intel.db
+      - key: STORE_INTEL_UPLOAD_DIR
+        value: /app/runtime/uploads
+      - key: STORE_INTEL_USE_YOLO
+        value: "0"
+    disk:
+      name: store-intel-runtime
+      mountPath: /app/runtime
+      sizeGB: 1

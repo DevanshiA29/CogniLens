@@ -56,6 +56,7 @@ Docker details:
 - Healthcheck: `GET /health`
 - Default environment:
   - `STORE_INTEL_DB_PATH=/app/data/store_intel.db`
+  - `STORE_INTEL_UPLOAD_DIR=/app/uploads`
   - `STORE_INTEL_USE_YOLO=0`
 
 Useful checks after startup:
@@ -74,6 +75,10 @@ To reset Docker persistence during development:
 ```bash
 docker compose down -v
 ```
+
+## Deploy
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the recommended Render deployment, persistent disk settings, health check, and live endpoint verification commands.
 
 ## Process Footage
 

@@ -81,7 +81,7 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
     ) -> dict[str, Any]:
         if not file.filename or Path(file.filename).suffix.lower() != ".mp4":
             raise HTTPException(status_code=400, detail="Please upload a valid MP4 video.")
-        upload_dir = Path("uploads")
+        upload_dir = Path(os.getenv("STORE_INTEL_UPLOAD_DIR", "uploads"))
         upload_dir.mkdir(exist_ok=True)
         target = upload_dir / Path(file.filename).name
         with target.open("wb") as handle:
