@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CogniLens</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260603-polish" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260603-track-colors" />
   </head>
   <body>
     <header class="topbar">
@@ -21,9 +21,11 @@
       </div>
       <div class="actions">
         <span id="systemStatus" class="status-pill"><span></span> Ready for analysis</span>
-        <input id="storeId" value="STORE_BLR_002" />
+        <div class="demo-actions">
+          <input id="storeId" value="STORE_BLR_002" />
+          <button id="runDemo" title="Generate sample CCTV and process it when you do not have an MP4 ready">Use Demo Video</button>
+        </div>
         <button id="downloadInsights" class="secondary-action" disabled>Download Insights CSV</button>
-        <button id="runDemo" title="Generate sample CCTV and process it when you do not have an MP4 ready">Use Demo Video</button>
       </div>
     </header>
 
@@ -34,9 +36,17 @@
           <h2>Upload CCTV MP4</h2>
           <p id="uploadStatus">Select a store camera clip and process it through the analytics agents.</p>
         </div>
-        <label class="file-button" for="videoUpload">Choose MP4</label>
-        <input id="videoUpload" type="file" accept="video/mp4,.mp4" />
-        <button id="processUpload" disabled>Process Video</button>
+        <div class="upload-actions">
+          <label class="file-button" for="videoUpload">Choose MP4</label>
+          <input id="videoUpload" type="file" accept="video/mp4,.mp4" />
+          <button id="processUpload" disabled>Process Video</button>
+        </div>
+        <div class="review-controls review-library">
+          <select id="savedReviews" disabled>
+            <option value="">No saved CCTV reviews</option>
+          </select>
+          <button id="loadReview" class="secondary-action" disabled>Load Saved Review</button>
+        </div>
       </section>
 
       <section class="metrics" id="metrics" hidden></section>
@@ -99,6 +109,8 @@
             <div id="overlayBadges" class="overlay-badges"></div>
             <div id="overlayTooltip" class="overlay-tooltip" hidden></div>
           </div>
+          <button id="toggleVideoFocus" class="video-focus-button" disabled>Make Video Centre Focus</button>
+          <button id="saveReview" class="save-review-button secondary-action" disabled>Save CCTV For Later Review</button>
           <div class="overlay-controls" aria-label="Overlay controls">
             <label><input type="checkbox" data-overlay-toggle="customers" checked /> Customers</label>
             <label><input type="checkbox" data-overlay-toggle="employees" checked /> Employees</label>
@@ -145,6 +157,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260603-polish"></script>
+    <script src="/static/app.js?v=20260603-track-colors"></script>
   </body>
 </html>

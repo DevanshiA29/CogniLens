@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import logging
+import os
 
 from store_intel.agents.event_generator import EventGeneratorAgent
 from store_intel.agents.frame_analyzer import FrameAnalyzerAgent
@@ -10,6 +11,7 @@ from store_intel.agents.input_agent import InputAgent
 from store_intel.agents.memory_store import MemoryEventStoreAgent
 from store_intel.agents.metrics_agent import IntelligenceMetricsAgent
 from store_intel.demo import create_demo_video
+from store_intel.orchestration import AgentRunState, OrchestrationLimitError, fallback_summary, json_state, telemetry_step
 
 
 class StoreIntelligencePipeline:
@@ -32,31 +34,92 @@ class StoreIntelligencePipeline:
         timestamp_offset: str = "2026-03-03T14:22:10Z",
         replace_store: bool = False,
     ) -> dict[str, Any]:
+        state = AgentRunState()
         if replace_store:
             self.store.clear_store(store_id)
             logging.info("pipeline.store_cleared", extra={"store_id": store_id})
-        metadata = self.input_agent.inspect_video(video_path, store_id, camera_id, timestamp_offset)
-        layout = self.input_agent.load_store_layout(layout_path)
-        observations = self.analyzer.analyze_video(metadata, layout)
-        events = self.generator.from_observations(observations)
-        self._load_pos_transactions(pos_path, store_id)
-        inserted = self.store.ingest_events(events)
+        total_steps = 6
+        try:
+            metadata = telemetry_step(
+                state,
+                step=1,
+                total=total_steps,
+                agent="InputAgent",
+                tool="inspect_video",
+                inputs=json_state(video_path=str(video_path), store_id=store_id, camera_id=camera_id),
+                run=lambda: self.input_agent.inspect_video(video_path, store_id, camera_id, timestamp_offset),
+            )
+            metadata = self._cap_metadata_duration(metadata)
+            layout = telemetry_step(
+                state,
+                step=2,
+                total=total_steps,
+                agent="InputAgent",
+                tool="load_store_layout",
+                inputs=json_state(layout_path=str(layout_path) if layout_path else None),
+                run=lambda: self.input_agent.load_store_layout(layout_path),
+            )
+            observations = telemetry_step(
+                state,
+                step=3,
+                total=total_steps,
+                agent="FrameAnalyzerAgent",
+                tool="analyze_video",
+                inputs=json_state(video_id=metadata["video_id"], duration_sec=metadata["duration_sec"], layout_name=layout.get("layout_name")),
+                run=lambda: self.analyzer.analyze_video(metadata, layout),
+            )
+            events = telemetry_step(
+                state,
+                step=4,
+                total=total_steps,
+                agent="EventGeneratorAgent",
+                tool="from_observations",
+                inputs=json_state(observation_count=len(observations)),
+                run=lambda: self.generator.from_observations(observations),
+            )
+            self._load_pos_transactions(pos_path, store_id)
+            inserted = telemetry_step(
+                state,
+                step=5,
+                total=total_steps,
+                agent="MemoryEventStoreAgent",
+                tool="ingest_events",
+                inputs=json_state(store_id=store_id, event_count=len(events)),
+                run=lambda: self.store.ingest_events(events),
+            )
+        except OrchestrationLimitError as exc:
+            logging.warning("pipeline.fallback", extra={"reason": str(exc), "store_id": store_id})
+            return fallback_summary(state, str(exc))
         logging.info("pipeline.processed_video", extra={"store_id": store_id, "camera_id": camera_id, "observations": len(observations), "events": len(events), "inserted": inserted})
-        self.store.set_current_video(
-            store_id=store_id,
-            video_path=str(Path(video_path).resolve()),
-            camera_id=camera_id,
-            duration_sec=int(metadata["duration_sec"]),
-            fps=int(metadata["fps"]),
-            updated_at=metadata["timestamp_offset"],
+        telemetry_step(
+            state,
+            step=6,
+            total=total_steps,
+            agent="MemoryEventStoreAgent",
+            tool="set_current_video",
+            inputs=json_state(store_id=store_id, video_id=metadata["video_id"]),
+            run=lambda: self.store.set_current_video(
+                store_id=store_id,
+                video_path=str(Path(video_path).resolve()),
+                camera_id=camera_id,
+                duration_sec=int(metadata["duration_sec"]),
+                fps=int(metadata["fps"]),
+                updated_at=metadata["timestamp_offset"],
+            ),
         )
-        return {
-            "input": metadata,
-            "observations": len(observations),
-            "events_generated": len(events),
-            "events_inserted": inserted,
-            "metrics": self.metrics_agent.metrics(store_id),
-        }
+        return json_state(
+            status="ok",
+            input=metadata,
+            observations=len(observations),
+            events_generated=len(events),
+            events_inserted=inserted,
+            metrics=self.metrics_agent.metrics(store_id),
+            orchestration={
+                "max_iterations": state.max_iterations,
+                "iterations_used": state.iteration,
+                "steps_completed": state.steps_completed,
+            },
+        )
 
     def process_folder(
         self,
@@ -70,7 +133,14 @@ class StoreIntelligencePipeline:
             path for path in folder_path.iterdir() if path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"}
         )
         results = []
+        state = AgentRunState()
         for index, video in enumerate(videos, start=1):
+            try:
+                state.next_iteration("process_folder")
+            except OrchestrationLimitError as exc:
+                logging.warning("pipeline.folder_iteration_limit", extra={"folder": str(folder_path), "processed": len(results)})
+                results.append(fallback_summary(state, str(exc)))
+                break
             camera_id = self._camera_id_from_name(video, index)
             results.append(self.process_video(video, store_id, camera_id, layout_path, pos_path))
         return results
@@ -100,6 +170,27 @@ class StoreIntelligencePipeline:
                     """,
                     (transaction_id, store_id, timestamp, amount, "{}"),
                 )
+
+    @staticmethod
+    def _cap_metadata_duration(metadata: dict[str, Any]) -> dict[str, Any]:
+        max_seconds = int(os.getenv("STORE_INTEL_MAX_ANALYSIS_SECONDS", "180"))
+        duration = int(metadata.get("duration_sec") or 0)
+        if max_seconds <= 0 or duration <= max_seconds:
+            return metadata
+        capped = dict(metadata)
+        capped["original_duration_sec"] = duration
+        capped["duration_sec"] = max_seconds
+        capped["chunks"] = [f"{second}-{second + 1}s" for second in range(max_seconds)]
+        capped["analysis_capped"] = True
+        print(
+            f"[STEP 1/6] Agent [InputAgent] capped analysis window from {duration}s to {max_seconds}s",
+            flush=True,
+        )
+        logging.info(
+            "pipeline.analysis_duration_capped",
+            extra={"video_id": metadata.get("video_id"), "original_duration_sec": duration, "duration_sec": max_seconds},
+        )
+        return capped
 
     @staticmethod
     def _camera_id_from_name(path: Path, index: int) -> str:

@@ -6,6 +6,7 @@ ENV PORT=8000
 ENV STORE_INTEL_DB_PATH=/app/data/store_intel.db
 ENV STORE_INTEL_UPLOAD_DIR=/app/uploads
 ENV STORE_INTEL_USE_YOLO=0
+ENV STORE_INTEL_MAX_ANALYSIS_SECONDS=180
 
 WORKDIR /app
 
@@ -17,8 +18,9 @@ RUN apt-get update \
     ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md DESIGN.md CHOICES.md Dockerfile docker-compose.yml ./
 COPY store_intel ./store_intel
+COPY tests ./tests
 COPY store_layout.json pos_transactions.csv ./
 
 RUN pip install --no-cache-dir -e .

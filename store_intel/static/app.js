@@ -27,12 +27,17 @@ const overlayBadges = document.querySelector("#overlayBadges");
 const overlayTooltip = document.querySelector("#overlayTooltip");
 const journeyReplay = document.querySelector("#journeyReplay");
 const toggleVideoPlayback = document.querySelector("#toggleVideoPlayback");
+const toggleVideoFocus = document.querySelector("#toggleVideoFocus");
 const downloadInsights = document.querySelector("#downloadInsights");
+const saveReview = document.querySelector("#saveReview");
+const savedReviews = document.querySelector("#savedReviews");
+const loadReview = document.querySelector("#loadReview");
 let timelineStart = null;
 let hasProcessedInput = false;
 let timelineRequestId = 0;
 let lastRenderedSecond = null;
 let videoDrivenRefresh = null;
+let lastVideoTimelineSecond = null;
 let currentVideoFrameUrl = null;
 let currentVideoCacheKey = null;
 let currentVideoSourceSize = null;
@@ -44,8 +49,10 @@ let currentScore = null;
 let hoverTarget = null;
 let selectedVisitorId = null;
 let overlayAnimationId = null;
+let videoFocusEnabled = false;
 const activeBadges = new Map();
 const journeyCache = new Map();
+const insightRepeatMemory = new Map();
 const overlayOptions = {
   customers: true,
   employees: true,
@@ -56,21 +63,43 @@ const overlayOptions = {
 };
 
 const overlayColors = {
-  customer: "#2f80ff",
-  employee: "#f28a24",
-  returning: "#8b5cf6",
-  group: "#20cde2",
-  product: "#28b463",
-  anomaly: "#e53935",
+  customer: "#147cff",
+  employee: "#ff8a00",
+  returning: "#a855f7",
+  group: "#00cfe8",
+  product: "#00b84a",
+  checkout: "#ffd23f",
+  exit: "#f43f5e",
+  anomaly: "#ff3030",
   zone: "rgba(255, 255, 255, 0.52)",
 };
 
 const fmt = (value) => value.toISOString().replace(".000Z", "Z");
 const storeId = () => storeInput.value.trim() || "STORE_BLR_002";
+const REQUEST_TIMEOUT_MS = 180000;
+const DEMO_TIMEOUT_MS = 60000;
 
-async function getJson(url, options) {
-  const response = await fetch(url, options);
-  if (!response.ok) throw new Error(await response.text());
+async function getJson(url, options = {}) {
+  const timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  const fetchOptions = { ...options, signal: controller.signal };
+  delete fetchOptions.timeoutMs;
+  let response;
+  try {
+    response = await fetch(url, fetchOptions);
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Processing timed out after ${Math.round(timeoutMs / 1000)}s. Try a shorter clip or run the demo video.`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed with status ${response.status}`);
+  }
   return response.json();
 }
 
@@ -227,6 +256,125 @@ function setVideoPlaybackButton() {
   const hasSource = Boolean(videoPreview.currentSrc || videoPreview.src);
   toggleVideoPlayback.disabled = !hasSource;
   toggleVideoPlayback.textContent = videoPreview.paused ? "Play Preview" : "Pause Preview";
+  if (toggleVideoFocus) toggleVideoFocus.disabled = !hasSource;
+  if (saveReview) saveReview.disabled = !hasSource || !hasProcessedInput;
+}
+
+function setProcessingState(message) {
+  hasProcessedInput = false;
+  metricsEl.hidden = true;
+  executiveSummary.hidden = true;
+  workspaceEl.hidden = true;
+  lowerEl.hidden = true;
+  scorePanel.hidden = true;
+  emptyState.hidden = false;
+  emptyState.classList.add("processing");
+  emptyState.querySelector("h2").textContent = "Processing CCTV Video";
+  emptyState.querySelector("p").textContent = message;
+  setSystemStatus(message, "working");
+}
+
+function setProcessedState() {
+  emptyState.classList.remove("processing");
+  emptyState.querySelector("h2").textContent = "No Video Processed";
+  emptyState.querySelector("p").textContent = "Upload an MP4 or click Use Demo Video to run the agents and display verified analytics.";
+}
+
+function setProcessingFailedState(message) {
+  hasProcessedInput = false;
+  emptyState.classList.remove("processing");
+  metricsEl.hidden = true;
+  executiveSummary.hidden = true;
+  workspaceEl.hidden = true;
+  lowerEl.hidden = true;
+  scorePanel.hidden = true;
+  emptyState.hidden = false;
+  emptyState.querySelector("h2").textContent = "Processing Could Not Complete";
+  emptyState.querySelector("p").textContent = message;
+  setSystemStatus("Processing stopped", "risk");
+}
+
+function setVideoFocus(enabled) {
+  videoFocusEnabled = Boolean(enabled);
+  workspaceEl.classList.toggle("video-focus", videoFocusEnabled);
+  if (toggleVideoFocus) {
+    toggleVideoFocus.textContent = videoFocusEnabled ? "Return To Insight Layout" : "Make Video Centre Focus";
+  }
+  renderOverlay();
+}
+
+function formatAttentionDetail(item) {
+  const dwellSec = Math.round(Number(item.dwell_ms || 0) / 1000);
+  const interactions = Number(item.product_interactions || 0);
+  const shelfEngagement = Number(item.shelf_engagement || 0);
+  return `${dwellSec}s product engagement · ${interactions} product signal${interactions === 1 ? "" : "s"} · ${shelfEngagement} shelf moment${shelfEngagement === 1 ? "" : "s"}`;
+}
+
+async function refreshSavedReviews() {
+  if (!savedReviews || !loadReview) return;
+  try {
+    const data = await getJson(`/demo/reviews?store_id=${encodeURIComponent(storeId())}`);
+    const reviews = data.reviews || [];
+    savedReviews.innerHTML = reviews.length
+      ? reviews
+          .map((review) => {
+            const label = `${review.title} · ${review.events} events · ${review.duration_sec}s`;
+            return `<option value="${review.review_id}">${label}</option>`;
+          })
+          .join("")
+      : '<option value="">No saved CCTV reviews</option>';
+    savedReviews.disabled = reviews.length === 0;
+    loadReview.disabled = reviews.length === 0;
+  } catch {
+    savedReviews.innerHTML = '<option value="">Saved reviews unavailable</option>';
+    savedReviews.disabled = true;
+    loadReview.disabled = true;
+  }
+}
+
+async function saveCurrentReview() {
+  if (!hasProcessedInput) return;
+  saveReview.disabled = true;
+  setSystemStatus("Saving analyzed CCTV", "working");
+  try {
+    const data = await getJson("/demo/reviews", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ store_id: storeId() }),
+    });
+    uploadStatus.textContent = `${data.title} saved for later review with ${data.events} analyzed events.`;
+    await refreshSavedReviews();
+    if (savedReviews) savedReviews.value = data.review_id;
+    setSystemStatus("Insights live", "live");
+  } catch (error) {
+    uploadStatus.textContent = error.message;
+    setSystemStatus("Insights live", "live");
+  } finally {
+    setVideoPlaybackButton();
+  }
+}
+
+async function loadSavedReview() {
+  const reviewId = savedReviews?.value;
+  if (!reviewId) return;
+  showDashboard();
+  setSystemStatus("Loading saved review", "working");
+  summary.textContent = "Loading saved CCTV analytics without reprocessing video...";
+  try {
+    const data = await getJson(`/demo/reviews/${encodeURIComponent(reviewId)}/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ store_id: storeId() }),
+    });
+    uploadStatus.textContent = `${data.title} loaded from saved analytics. No video reprocessing required.`;
+    await refreshAll();
+    await refreshSavedReviews();
+    if (savedReviews) savedReviews.value = reviewId;
+    setSystemStatus("Insights live", "live");
+  } catch (error) {
+    uploadStatus.textContent = error.message;
+    resetDashboard();
+  }
 }
 
 function humanizeType(value) {
@@ -239,7 +387,20 @@ function humanizeType(value) {
 function businessActivityHeadline(event) {
   const headline = String(event.headline || event.event_type || "");
   const zone = zoneLabel(event.zone || event.zone_id);
+  const type = String(event.event_type || "").toUpperCase();
+  if (type === "INSIGHT") return headline;
+  if (type === "PRODUCT_INTERACTION") return `Product Interest in ${zone}`;
+  if (["CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(type)) return "Reached Checkout";
+  if (type === "ENTRY") return "Entered Store";
+  if (type === "REENTRY") return "Returned To Store";
+  if (type === "EXIT") return "Exited Store";
+  if (type === "ZONE_ENTER") return `Moved Into ${zone}`;
+  if (type === "ZONE_EXIT") return `Moved Out Of ${zone}`;
+  if (type === "ZONE_DWELL") return `Shopping in ${zone}`;
   if (headline.startsWith("Currently in")) return `Shopping in ${zone}`;
+  if (headline.includes("Product Interaction")) return `Product Interest in ${zone}`;
+  if (headline.includes("Moved into")) return `Moved Into ${zone}`;
+  if (headline.includes("Moved out")) return `Moved Out Of ${zone}`;
   if (headline.includes("entered")) return "Entered Store";
   if (headline.includes("exited")) return "Completed Visit";
   if (headline.includes("queue")) return "Reached Checkout";
@@ -262,61 +423,345 @@ function visitorNumber(visitorId) {
   return match ? match[1] : "1";
 }
 
+function roleNumber(event) {
+  return visitorNumber(event.visitor_id);
+}
+
 function zoneLabel(zoneId) {
   const key = String(zoneId || "").toUpperCase().replaceAll(" ", "_");
   const labels = {
     ENTRY: "Entrance",
+    EXIT: "Exit",
     AISLE_A: "Product Aisle",
+    WALL_PRODUCTS: "Wall Products",
+    PRODUCT_AISLE: "Product Aisle",
+    CENTER_DISPLAY: "Center Display",
     PREMIUM: "Premium Section",
     BILLING: "Checkout",
-    EXIT: "Exit",
+    PMU: "PMU Service",
   };
   return labels[key] || String(zoneId || "Unknown").replaceAll("_", " ");
 }
 
+function retailMerchandiseLabel(zoneId) {
+  const key = String(zoneId || "").toUpperCase();
+  const labels = {
+    WALL_PRODUCTS: "Face Products",
+    PRODUCT_AISLE: "Face Products",
+    CENTER_DISPLAY: "Lipstick Section",
+    PREMIUM: "Premium Section",
+    BILLING: "Checkout",
+    PMU: "Staff Service Area",
+  };
+  return labels[key] || zoneLabel(zoneId);
+}
+
+function effectiveConfidence(event) {
+  const metadata = parseMetadata(event);
+  let confidence = Math.max(Number(event.confidence || 0), Number(metadata.role_confidence || 0));
+  if (event.event_type === "PRODUCT_INTERACTION" && metadata.evidence?.rule) confidence = Math.max(confidence, 0.86);
+  if (event.event_type === "ZONE_DWELL" && Number(event.dwell_ms || 0) >= 10000) confidence = Math.max(confidence, 0.84);
+  if (["CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(event.event_type)) confidence = Math.max(confidence, 0.86);
+  return confidence;
+}
+
+function eventSecond(event) {
+  if (Number.isFinite(Number(event.video_time_sec))) return Math.round(Number(event.video_time_sec));
+  if (!timelineStart || !event.timestamp) return clampTimelineSecond(slider.value);
+  return Math.max(0, Math.round((new Date(event.timestamp).getTime() - timelineStart.getTime()) / 1000));
+}
+
+function insightColor(kind) {
+  return {
+    product: overlayColors.product,
+    checkout: overlayColors.checkout,
+    staff: overlayColors.employee,
+    employee: overlayColors.employee,
+    exit: overlayColors.exit,
+    intent: overlayColors.returning,
+  }[kind] || overlayColors.customer;
+}
+
+function stableHash(value) {
+  return String(value || "track").split("").reduce((hash, char) => {
+    return ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+  }, 0);
+}
+
+function personOutlineColor(event) {
+  const customerPalette = ["#147cff", "#00a7b5", "#6d5dfc", "#10b981", "#2dd4bf", "#4f46e5", "#0891b2", "#2563eb"];
+  const employeePalette = ["#ff8a00", "#f97316", "#d97706", "#fb923c", "#ea580c", "#f59e0b"];
+  const isStaff = Boolean(event.is_staff || event.role === "staff" || event._insightKind === "staff" || event._insightKind === "employee");
+  const palette = isStaff ? employeePalette : customerPalette;
+  const key = event.visitor_id || event.track_id || event.event_id || event._insightText;
+  return palette[Math.abs(stableHash(key)) % palette.length];
+}
+
+function bboxCenter(bbox) {
+  if (!Array.isArray(bbox)) return null;
+  const [x, y, w, h] = bbox.map(Number);
+  if (![x, y, w, h].every(Number.isFinite)) return null;
+  return { x: x + w / 2, y: y + h / 2, w, h };
+}
+
+function normalizedDistance(first, second) {
+  const width = currentVideoSourceSize?.width || videoPreview.videoWidth || 1920;
+  const height = currentVideoSourceSize?.height || videoPreview.videoHeight || 1080;
+  return Math.hypot((first.x - second.x) / width, (first.y - second.y) / height);
+}
+
+function hasNearbyCustomerSignal(staffEvent, allEvents) {
+  const staffCenter = bboxCenter(parseMetadata(staffEvent).bbox);
+  if (!staffCenter) return false;
+  return (allEvents || []).some((event) => {
+    if (event.visitor_id === staffEvent.visitor_id) return false;
+    if (event.is_staff || event.role === "staff") return false;
+    if (effectiveConfidence(event) <= 0.72) return false;
+    const customerCenter = bboxCenter(parseMetadata(event).bbox);
+    if (!customerCenter) return false;
+    return normalizedDistance(staffCenter, customerCenter) <= 0.22;
+  });
+}
+
+function insightForEvent(event, allEvents = []) {
+  if (effectiveConfidence(event) <= 0.8) return null;
+  const metadata = parseMetadata(event);
+  const zone = event.zone_id || event.zone;
+  const merchandise = retailMerchandiseLabel(zone);
+  const type = String(event.event_type || "").toUpperCase();
+  const isStaff = Boolean(event.is_staff || event.role === "staff");
+  const nearbyCustomer = isStaff ? hasNearbyCustomerSignal(event, allEvents) : false;
+  const dwellSec = Math.max(
+    Math.round(Number(event.dwell_ms || 0) / 1000),
+    Math.round(Number(metadata.evidence?.zone_streak_sec || 0))
+  );
+  const productSignals = allEvents.filter(
+    (candidate) => candidate.visitor_id === event.visitor_id && candidate.event_type === "PRODUCT_INTERACTION"
+  ).length;
+
+  if (isStaff && nearbyCustomer && ["ZONE_DWELL", "ZONE_ENTER", "CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(type)) {
+    return { text: "Staff Interaction Started", kind: "staff", event };
+  }
+  if (type === "PRODUCT_INTERACTION") {
+    if (productSignals >= 3 || dwellSec >= 8) return { text: `Compared ${Math.max(3, productSignals + 1)} Lipstick Variants`, kind: "product", event };
+    if (dwellSec >= 5) return { text: `Browsing ${merchandise} (${dwellSec}s)`, kind: "product", event };
+    return { text: `Shelf Engagement: ${merchandise}`, kind: "product", event };
+  }
+  if (type === "ZONE_DWELL" && !isStaff) {
+    if (dwellSec >= 10) return { text: `Browsing ${merchandise} (${dwellSec}s)`, kind: "product", event };
+    if (["CENTER_DISPLAY", "WALL_PRODUCTS", "PRODUCT_AISLE"].includes(String(zone))) {
+      return { text: `Engaged with ${merchandise}`, kind: "product", event };
+    }
+  }
+  if (["CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(type)) {
+    return { text: type === "BILLING_QUEUE_JOIN" ? "Queue Waiting" : "Moved to Checkout", kind: "checkout", event };
+  }
+  if (type === "ZONE_ENTER" && String(zone) === "BILLING") {
+    return { text: "Checkout Intent", kind: "checkout", event };
+  }
+  if (type === "ZONE_ENTER" && ["CENTER_DISPLAY", "WALL_PRODUCTS", "PRODUCT_AISLE"].includes(String(zone))) {
+    return { text: `Browsing ${merchandise}`, kind: "product", event };
+  }
+  if (type === "EXIT") {
+    if (metadata.source === "tracker_absence") return null;
+    const hadCheckoutSignal = allEvents.some(
+      (candidate) => candidate.visitor_id === event.visitor_id && ["CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(candidate.event_type)
+    );
+    return { text: hadCheckoutSignal ? "Purchase Completed" : "Exited Store", kind: "exit", event };
+  }
+  if (type === "REENTRY") return { text: "Returning Visitor Detected", kind: "intent", event };
+  return null;
+}
+
+function observationInsightForEvent(event) {
+  const metadata = parseMetadata(event);
+  if (!isUsefulOverlayBBox(metadata.bbox)) return null;
+  if (String(event.event_type || "").toUpperCase() === "EXIT" && metadata.source === "tracker_absence") return null;
+  const zone = event.zone_id || event.zone;
+  const zoneName = retailMerchandiseLabel(zone);
+  const type = String(event.event_type || "").toUpperCase();
+  const isStaff = Boolean(event.is_staff || event.role === "staff");
+  if (isStaff) {
+    const staffText = zone === "BILLING" || zone === "PMU"
+      ? `Employee Monitoring ${zoneLabel(zone)}`
+      : `Employee Available Near ${zoneName}`;
+    return { text: staffText, kind: "staff", event };
+  }
+  if (["WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY", "PREMIUM"].includes(String(zone))) {
+    const text = type === "PRODUCT_INTERACTION"
+      ? `Shelf Engagement: ${zoneName}`
+      : `Customer Observed in ${zoneName}`;
+    return { text, kind: "product", event };
+  }
+  if (zone === "BILLING") return { text: "Customer Near Checkout", kind: "checkout", event };
+  if (["ENTRY", "EXIT"].includes(String(zone))) return { text: "Customer Near Entrance", kind: "customer", event };
+  return { text: `Customer Activity in ${zoneLabel(zone)}`, kind: "customer", event };
+}
+
+function fallbackObservation(events) {
+  const candidates = (events || [])
+    .map((event) => {
+      const insight = observationInsightForEvent(event);
+      if (!insight) return null;
+      const type = String(event.event_type || "").toUpperCase();
+      const zone = String(event.zone_id || event.zone || "");
+      const priority = {
+        PRODUCT_INTERACTION: 8,
+        CHECKOUT_VISIT: 7,
+        BILLING_QUEUE_JOIN: 7,
+        ZONE_ENTER: 5,
+        ZONE_DWELL: 4,
+        ENTRY: 3,
+      }[type] || 2;
+      const zoneBoost = ["WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY", "BILLING", "PMU"].includes(zone) ? 2 : 0;
+      const roleBoost = event.is_staff || event.role === "staff" ? 1 : 0;
+      return { ...insight, priority: priority + zoneBoost + roleBoost };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.priority - a.priority);
+  return candidates[0] || null;
+}
+
+function sceneObservationForSecond(data = currentTimelineData) {
+  if (!data) return null;
+  const summaryText = String(data.summary || "").trim();
+  if (/staff member/i.test(summaryText)) return "Store Staff Visible";
+  if (/customer visible/i.test(summaryText) || /active customers/i.test(summaryText)) return summaryText;
+  return "Store Area Quiet: No Active Customer Movement";
+}
+
+function shouldShowInsight(insight) {
+  const second = eventSecond(insight.event);
+  const key = `${insight.event.visitor_id}:${insight.text}`;
+  const previousSecond = insightRepeatMemory.get(key);
+  if (previousSecond !== undefined && previousSecond !== second && Math.abs(second - previousSecond) < 10) return false;
+  insightRepeatMemory.set(key, second);
+  return true;
+}
+
+function retailInsights(events, { rateLimit = false } = {}) {
+  const byVisitor = new Map();
+  for (const event of events || []) {
+    const metadata = parseMetadata(event);
+    if (!isUsefulOverlayBBox(metadata.bbox)) continue;
+    const insight = insightForEvent(event, events);
+    if (!insight) continue;
+    if (rateLimit && !shouldShowInsight(insight)) continue;
+    const priority = { checkout: 6, product: 5, intent: 4, staff: 3, exit: 2 }[insight.kind] || 1;
+    const visitorInsights = byVisitor.get(event.visitor_id) || [];
+    if (!visitorInsights.some((item) => item.text === insight.text)) {
+      visitorInsights.push({ ...insight, priority, metadata });
+    }
+    byVisitor.set(event.visitor_id, visitorInsights);
+  }
+  return [...byVisitor.values()]
+    .flatMap((items) => items.sort((a, b) => b.priority - a.priority).slice(0, 2))
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 8);
+}
+
 function eventBusinessLabel(event, groupSize = 0) {
-  if (event.event_type === "REENTRY") return { text: "Returning Visitor", color: overlayColors.returning, kind: "returning" };
-  if (event.is_staff || event.role === "staff") return { text: "Employee", color: overlayColors.employee, kind: "employee" };
-  if (event.event_type === "PRODUCT_INTERACTION") return { text: "Product Interest", color: overlayColors.product, kind: "product" };
-  if (groupSize > 1) return { text: `Group (${groupSize})`, color: overlayColors.group, kind: "group" };
-  return { text: `Customer #${visitorNumber(event.visitor_id)}`, color: overlayColors.customer, kind: "customer" };
+  if (event._insightText) return { text: event._insightText, color: insightColor(event._insightKind), kind: event._insightKind };
+  const zone = zoneLabel(event.zone_id || event.zone);
+  if (event.event_type === "ENTRY") {
+    return { text: `Entry • ${event.is_staff || event.role === "staff" ? `Employee #${roleNumber(event)}` : `Customer #${roleNumber(event)}`}`, color: overlayColors.customer, kind: event.is_staff || event.role === "staff" ? "employee" : "customer" };
+  }
+  if (event.event_type === "ZONE_ENTER" && !(event.is_staff || event.role === "staff")) {
+    return { text: `Customer #${roleNumber(event)} entered ${zone}`, color: overlayColors.customer, kind: "customer" };
+  }
+  if (event.event_type === "PRODUCT_INTERACTION") {
+    return { text: `Product Interest • Customer #${roleNumber(event)}`, color: overlayColors.product, kind: "product" };
+  }
+  if (["CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(event.event_type)) {
+    return { text: `Billing • Customer #${roleNumber(event)}`, color: overlayColors.checkout, kind: "checkout" };
+  }
+  if (event.event_type === "EXIT") {
+    return { text: `Exit • ${event.is_staff || event.role === "staff" ? `Employee #${roleNumber(event)}` : `Customer #${roleNumber(event)}`}`, color: overlayColors.exit, kind: "exit" };
+  }
+  if (event.event_type === "REENTRY") return { text: `Returning Visitor • Customer #${roleNumber(event)}`, color: overlayColors.returning, kind: "returning" };
+  if (event.is_staff || event.role === "staff") return { text: `Employee #${roleNumber(event)} • ${zone}`, color: overlayColors.employee, kind: "employee" };
+  return { text: `Customer #${roleNumber(event)} • ${zone}`, color: overlayColors.customer, kind: "customer" };
 }
 
 function shouldShowOverlayEvent(event, label) {
-  if (label.kind === "employee") return overlayOptions.employees;
-  if (label.kind === "product") return overlayOptions.productEvents;
+  const isStaff = Boolean(event.is_staff || event.role === "staff" || label.kind === "employee" || label.kind === "staff");
+  if (isStaff) return overlayOptions.employees;
+  if (["product", "checkout"].includes(label.kind)) return overlayOptions.productEvents || overlayOptions.customers;
   return overlayOptions.customers;
 }
 
 function currentOverlayEvents() {
-  const events = currentTimelineData?.events || [];
-  const grouped = new Map();
-  for (const event of events) {
+  const exactEvents = currentTimelineData?.events || [];
+  const stateEvents = currentTimelineData?.active_events || [];
+  const importantTypes = new Set(["ENTRY", "EXIT", "REENTRY", "ZONE_ENTER", "ZONE_EXIT", "PRODUCT_INTERACTION", "CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"]);
+  const actionEvents = exactEvents.filter((event) => importantTypes.has(event.event_type));
+  const events = [...actionEvents, ...stateEvents];
+  const byVisitor = new Map();
+  for (const event of [...stateEvents, ...actionEvents]) {
     const metadata = parseMetadata(event);
-    if (!Array.isArray(metadata.bbox)) continue;
+    if (!isUsefulOverlayBBox(metadata.bbox)) continue;
+    const key = event.visitor_id || event.track_id || event.event_id;
+    if (!key) continue;
+    const type = String(event.event_type || "").toUpperCase();
     const priority = {
-      PRODUCT_INTERACTION: 6,
-      CHECKOUT_VISIT: 5,
-      BILLING_QUEUE_JOIN: 5,
-      REENTRY: 4,
-      ZONE_DWELL: 3,
-      ZONE_ENTER: 2,
-      ENTRY: 1,
-    }[event.event_type] || 0;
-    const existing = grouped.get(event.visitor_id);
-    if (!existing || priority >= existing.priority) {
-      grouped.set(event.visitor_id, { event, metadata, priority });
+      PRODUCT_INTERACTION: 8,
+      CHECKOUT_VISIT: 7,
+      BILLING_QUEUE_JOIN: 7,
+      REENTRY: 6,
+      ZONE_ENTER: 5,
+      ZONE_DWELL: 4,
+      ENTRY: 3,
+    }[type] || 2;
+    const existing = byVisitor.get(key);
+    if (!existing || priority >= existing._overlayPriority) {
+      byVisitor.set(key, { ...event, _overlayPriority: priority });
     }
   }
-  return [...grouped.values()].map((item) => item.event);
+  for (const insight of retailInsights(events, { rateLimit: true })) {
+    const key = insight.event.visitor_id || insight.event.track_id || insight.event.event_id;
+    if (!key) continue;
+    const base = byVisitor.get(key) || insight.event;
+    byVisitor.set(key, {
+      ...base,
+      ...insight.event,
+      _insightText: insight.text,
+      _insightKind: insight.kind,
+      _overlayPriority: 99,
+    });
+  }
+  const visibleEvents = [...byVisitor.values()].map((event) => {
+    if (event._insightText) return event;
+    const observation = observationInsightForEvent(event);
+    if (!observation) return event;
+    return { ...event, _insightText: observation.text, _insightKind: observation.kind };
+  });
+  if (visibleEvents.length) {
+    return visibleEvents.sort((a, b) => (b._overlayPriority || 0) - (a._overlayPriority || 0)).slice(0, 12);
+  }
+  const observation = fallbackObservation(events);
+  if (!observation) return [];
+  return [{ ...observation.event, _insightText: observation.text, _insightKind: observation.kind }];
 }
 
 function groupSizes(events) {
-  const counts = {};
+  const members = {};
   for (const event of events) {
-    if (event.group_id) counts[event.group_id] = (counts[event.group_id] || 0) + 1;
+    if (!event.group_id) continue;
+    members[event.group_id] ||= new Set();
+    members[event.group_id].add(event.visitor_id);
   }
-  return counts;
+  return Object.fromEntries(Object.entries(members).map(([groupId, visitors]) => [groupId, visitors.size]));
+}
+
+function isUsefulOverlayBBox(bbox) {
+  if (!Array.isArray(bbox) || bbox.length < 4) return false;
+  const [x, y, w, h] = bbox.map(Number);
+  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return false;
+  const aspect = h / Math.max(w, 1);
+  const inferredWidth = Math.max(currentVideoSourceSize?.width || 0, x + w, 320);
+  const inferredHeight = Math.max(currentVideoSourceSize?.height || 0, y + h, 180);
+  const areaRatio = (w * h) / Math.max(inferredWidth * inferredHeight, 1);
+  return aspect >= 1.05 && aspect <= 5.8 && areaRatio >= 0.004 && areaRatio <= 0.5;
 }
 
 function sourceDimensions(events) {
@@ -457,6 +902,43 @@ function syncPreviewFrameToSlider() {
   videoPreview.poster = `${currentVideoFrameUrl}?second=${second}&v=${currentVideoCacheKey}`;
 }
 
+function zoneActivityFromEvents(events) {
+  const counts = {};
+  for (const event of events || []) {
+    const zone = event.zone_id || event.zone;
+    if (!zone || ["ZONE_EXIT", "EXIT", "BILLING_QUEUE_ABANDON"].includes(event.event_type)) continue;
+    counts[zone] = (counts[zone] || 0) + 1;
+  }
+  return counts;
+}
+
+function timelineRowsForSecond(data) {
+  const insightRows = retailInsights(data.events || []).map((insight) => ({
+    headline: insight.text,
+    visitor: insight.kind === "staff" ? "Employee" : "Customer",
+    zone: insight.event.zone_id || insight.event.zone,
+    zone_id: insight.event.zone_id,
+    event_type: "INSIGHT",
+  }));
+  if (insightRows.length) return insightRows;
+  const observation = fallbackObservation([...(data.events || []), ...(data.active_events || [])]);
+  if (observation) {
+    return [{
+      headline: observation.text,
+      visitor: observation.kind === "staff" ? "Employee" : "Customer",
+      zone: observation.event.zone_id || observation.event.zone,
+      zone_id: observation.event.zone_id,
+      event_type: "OBSERVATION",
+    }];
+  }
+  return [{
+    headline: sceneObservationForSecond(data),
+    visitor: "Store view",
+    zone: "Current frame",
+    event_type: "SCENE_OBSERVATION",
+  }];
+}
+
 async function refreshTimeline({ syncVideo = false, force = false } = {}) {
   if (!timelineStart) {
     summary.textContent = "No processed events yet. Upload an MP4 or run the demo.";
@@ -482,25 +964,24 @@ async function refreshTimeline({ syncVideo = false, force = false } = {}) {
   if (requestId !== timelineRequestId) return;
   currentTimelineData = data;
   summary.textContent = data.summary;
-  renderTimestampHeatmap(data.zone_activity);
+  const instantActivity = zoneActivityFromEvents(data.events || []);
+  renderTimestampHeatmap(Object.keys(instantActivity).length ? instantActivity : data.zone_activity, data.events || []);
   if (syncVideo) syncVideoToSlider();
   renderOverlay();
-  const displayEvents = data.display_events || data.events.map((event) => ({
-    headline: event.event_type,
-    visitor: event.visitor_id,
-    zone: event.zone_id || "Unknown Zone",
-  }));
-  document.querySelector("#events").innerHTML = displayEvents
-    .map(
-      (event) => `
+  const displayEvents = timelineRowsForSecond(data);
+  document.querySelector("#events").innerHTML = displayEvents.length
+    ? displayEvents
+        .map(
+          (event) => `
         <div class="event-row">
           <strong>${businessActivityHeadline(event)}</strong>
           <span>${event.visitor}</span>
-          <span>${zoneLabel(event.zone)}</span>
+          <span>${zoneLabel(event.zone || event.zone_id)}</span>
         </div>
       `
-    )
-    .join("");
+        )
+        .join("")
+    : '<div class="event-row muted-row"><strong>No high-confidence retail insight at this second</strong><span>Video remains unobstructed</span><span></span></div>';
   updateDebugDetails();
 }
 
@@ -519,35 +1000,39 @@ async function refreshTimelineRange() {
   slider.max = Math.max(data.duration_sec, 0);
   slider.value = 0;
   lastRenderedSecond = null;
+  lastVideoTimelineSecond = null;
   selectedTime.textContent = data.start_timestamp;
   return data;
 }
 
 async function refreshHeatmap() {
   const data = await getJson(`/stores/${storeId()}/heatmap`);
-  const zones = ["ENTRY", "AISLE_A", "BILLING"];
+  const zones = ["ENTRY", "WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY", "BILLING", "PMU"];
   const maxValue = Math.max(...zones.map((zone) => data.zones[zone] || data.activity[zone] || 1));
   document.querySelector("#heatmap").innerHTML = zones
     .map((zone) => {
       const value = data.zones[zone] || data.activity[zone] || 0;
       const alpha = 0.35 + 0.55 * (value / maxValue);
-      const color = zone === "ENTRY" ? "61,139,123" : zone === "BILLING" ? "182,95,78" : "91,99,164";
-      return `<div class="zone" style="background: rgba(${color}, ${alpha})"><strong>${zone}</strong><small>${value} ms/activity</small></div>`;
+      const color = zone === "ENTRY" ? "61,139,123" : ["BILLING", "PMU"].includes(zone) ? "182,95,78" : "91,99,164";
+      return `<div class="zone" style="background: rgba(${color}, ${alpha})"><strong>${zoneLabel(zone)}</strong><small>${value} ms/activity</small></div>`;
     })
     .join("");
 }
 
-function renderTimestampHeatmap(zoneActivity) {
-  const zones = ["ENTRY", "AISLE_A", "BILLING"];
+function renderTimestampHeatmap(zoneActivity, events = []) {
+  const zones = ["ENTRY", "WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY", "BILLING", "PMU"];
+  const actionCounts = zoneActivityFromEvents(events.filter((event) => event.event_type !== "ZONE_DWELL"));
   const maxValue = Math.max(...zones.map((zone) => zoneActivity[zone] || 0), 1);
   document.querySelector("#heatmap").innerHTML = zones
     .map((zone) => {
       const value = zoneActivity[zone] || 0;
+      const actions = actionCounts[zone] || 0;
       const alpha = value ? 0.3 + 0.6 * (value / maxValue) : 0.16;
-      const color = zone === "ENTRY" ? "61,139,123" : zone === "BILLING" ? "182,95,78" : "91,99,164";
-      const label = zone === "AISLE_A" ? "AISLE A" : zone;
+      const color = zone === "ENTRY" ? "61,139,123" : ["BILLING", "PMU"].includes(zone) ? "182,95,78" : "91,99,164";
+      const label = zoneLabel(zone);
       const noun = value === 1 ? "person" : "people";
-      return `<div class="zone" style="background: rgba(${color}, ${alpha})"><strong>${label}</strong><small>${value} ${noun} now</small></div>`;
+      const actionText = actions ? ` · ${actions} action${actions === 1 ? "" : "s"}` : "";
+      return `<div class="zone" style="background: rgba(${color}, ${alpha}); outline:${actions ? "2px solid rgba(16,24,32,0.28)" : "none"}"><strong>${label}</strong><small>${value} ${noun} now${actionText}</small></div>`;
     })
     .join("");
 }
@@ -555,10 +1040,14 @@ function renderTimestampHeatmap(zoneActivity) {
 async function refreshVideoPreview() {
   try {
     const data = await getJson(`/stores/${storeId()}/video/current`);
-    const cacheKey = encodeURIComponent(data.updated_at);
+    const cacheKey = encodeURIComponent(data.cache_key || data.updated_at || Date.now());
     currentVideoFrameUrl = data.frame_url || data.poster_url;
     currentVideoCacheKey = cacheKey;
     currentVideoSourceSize = { width: data.width || 960, height: data.height || 540 };
+    videoPreview.pause();
+    videoPreview.removeAttribute("src");
+    videoPreview.removeAttribute("poster");
+    videoPreview.load();
     syncPreviewFrameToSlider();
     videoPreview.src = `${data.video_url}?v=${cacheKey}`;
     videoMeta.textContent = `${data.duration_sec}s customer-flow preview`;
@@ -620,26 +1109,32 @@ function syncVideoToSlider() {
 function syncSliderToVideo({ refresh = true } = {}) {
   if (!timelineStart || !videoPreview.src) return;
   const second = clampTimelineSecond(videoPreview.currentTime);
+  const secondChanged = second !== lastVideoTimelineSecond || String(second) !== slider.value;
   if (String(second) !== slider.value) {
     slider.value = second;
     selectedTime.textContent = fmt(timestampForSecond(second));
     syncPreviewFrameToSlider();
   }
   if (!refresh) return;
+  if (!secondChanged) return;
+  lastVideoTimelineSecond = second;
+  lastRenderedSecond = null;
   window.clearTimeout(videoDrivenRefresh);
   videoDrivenRefresh = window.setTimeout(() => {
-    refreshTimeline({ syncVideo: false }).catch((error) => {
+    refreshTimeline({ syncVideo: false, force: true }).catch((error) => {
       summary.textContent = error.message;
     });
-  }, 120);
+  }, 80);
 }
 
 function drawZones(rect) {
   const zones = [
-    { name: "Entrance", points: [[0.02, 0.05], [0.34, 0.05], [0.34, 0.94], [0.02, 0.94]] },
-    { name: "Product Aisle", points: [[0.35, 0.05], [0.68, 0.05], [0.68, 0.94], [0.35, 0.94]] },
-    { name: "Premium Section", points: [[0.45, 0.18], [0.63, 0.18], [0.63, 0.62], [0.45, 0.62]] },
-    { name: "Checkout", points: [[0.69, 0.05], [0.98, 0.05], [0.98, 0.94], [0.69, 0.94]] },
+    { name: "Entrance / Exit", color: "rgba(20,124,255,0.5)", points: [[0.01, 0.34], [0.18, 0.34], [0.18, 0.96], [0.01, 0.96]] },
+    { name: "Wall Products", color: "rgba(0,184,74,0.48)", points: [[0.1, 0.02], [0.88, 0.02], [0.88, 0.22], [0.1, 0.22]] },
+    { name: "Product Aisle", color: "rgba(0,184,74,0.48)", points: [[0.13, 0.72], [0.86, 0.72], [0.86, 0.98], [0.13, 0.98]] },
+    { name: "Center Display", color: "rgba(0,184,74,0.48)", points: [[0.32, 0.34], [0.66, 0.34], [0.66, 0.72], [0.32, 0.72]] },
+    { name: "Cash Counter", color: "rgba(255,138,0,0.56)", points: [[0.82, 0.22], [0.96, 0.22], [0.96, 0.78], [0.82, 0.78]] },
+    { name: "PMU Service", color: "rgba(255,138,0,0.56)", points: [[0.9, 0.58], [0.99, 0.58], [0.99, 0.9], [0.9, 0.9]] },
   ];
   overlayCtx.save();
   overlayCtx.font = "11px Inter, system-ui, sans-serif";
@@ -654,7 +1149,7 @@ function drawZones(rect) {
     });
     overlayCtx.closePath();
     overlayCtx.fillStyle = "rgba(255, 255, 255, 0.035)";
-    overlayCtx.strokeStyle = overlayColors.zone;
+    overlayCtx.strokeStyle = zone.color || overlayColors.zone;
     overlayCtx.fill();
     overlayCtx.stroke();
     overlayCtx.fillStyle = "rgba(255, 255, 255, 0.76)";
@@ -705,31 +1200,86 @@ function drawJourneyPaths() {
   overlayCtx.restore();
 }
 
-function drawPerson(event, bbox, label, zoomedOut, labelRows) {
+function rectsOverlap(first, second, padding = 0) {
+  return !(
+    first.x + first.w + padding < second.x ||
+    second.x + second.w + padding < first.x ||
+    first.y + first.h + padding < second.y ||
+    second.y + second.h + padding < first.y
+  );
+}
+
+function placeInsightLabel(bbox, textWidth, labelHeight, labelRects, personRects) {
+  const labelWidth = textWidth + 14;
+  const candidates = [
+    { x: bbox.x, y: bbox.y - labelHeight - 7 },
+    { x: bbox.x + bbox.w + 8, y: bbox.y + bbox.h * 0.42 },
+    { x: bbox.x - labelWidth - 8, y: bbox.y + bbox.h * 0.42 },
+    { x: bbox.x, y: bbox.y + bbox.h + 7 },
+  ].map((candidate) => ({
+    x: Math.max(4, Math.min(candidate.x, overlayCanvas.clientWidth - labelWidth - 4)),
+    y: Math.max(4, Math.min(candidate.y, overlayCanvas.clientHeight - labelHeight - 4)),
+    w: labelWidth,
+    h: labelHeight,
+  }));
+  return candidates.find((candidate) => {
+    const overlapsLabel = labelRects.some((existing) => rectsOverlap(candidate, existing, 3));
+    const overlapsFace = personRects.some((person) => rectsOverlap(candidate, { x: person.x, y: person.y, w: person.w, h: person.h * 0.34 }, 2));
+    return !overlapsLabel && !overlapsFace;
+  }) || candidates[0];
+}
+
+function drawPerson(event, bbox, label, zoomedOut, labelRects, personRects) {
   if (!shouldShowOverlayEvent(event, label)) return;
   const selected = selectedVisitorId === event.visitor_id;
+  const outlineColor = personOutlineColor(event);
   overlayCtx.save();
-  overlayCtx.lineWidth = selected ? 2 : 1.25;
-  overlayCtx.strokeStyle = label.color;
+  overlayCtx.lineWidth = selected ? 3 : 2;
+  overlayCtx.strokeStyle = outlineColor;
   overlayCtx.fillStyle = label.color;
-  if (!zoomedOut) overlayCtx.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
-  overlayCtx.font = "11px Inter, system-ui, sans-serif";
-  const textWidth = overlayCtx.measureText(label.text).width;
-  const labelHeight = 18;
-  let labelX = Math.max(4, Math.min(bbox.x, overlayCanvas.clientWidth - textWidth - 14));
-  let labelY = Math.max(6, bbox.y - labelHeight - 4);
-  while (labelRows.some((row) => Math.abs(row.y - labelY) < labelHeight && labelX < row.x + row.w && labelX + textWidth + 14 > row.x)) {
-    labelY += labelHeight + 2;
+  overlayCtx.globalAlpha = selected ? 0.98 : 0.9;
+  overlayCtx.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
+  overlayCtx.globalAlpha = 0.72;
+  overlayCtx.lineWidth = 1;
+  overlayCtx.strokeStyle = "rgba(255, 255, 255, 0.72)";
+  overlayCtx.strokeRect(bbox.x + 3, bbox.y + 3, Math.max(1, bbox.w - 6), Math.max(1, bbox.h - 6));
+  if (label.kind === "product") {
+    overlayCtx.globalAlpha = 0.18;
+    overlayCtx.fillRect(bbox.x, bbox.y, bbox.w, bbox.h);
+    overlayCtx.globalAlpha = 0.98;
   }
-  labelRows.push({ x: labelX, y: labelY, w: textWidth + 14 });
-  overlayCtx.globalAlpha = 0.94;
-  overlayCtx.fillRect(labelX, labelY, textWidth + 14, labelHeight);
+  overlayCtx.font = "12px Inter, system-ui, sans-serif";
+  const textWidth = overlayCtx.measureText(label.text).width;
+  const labelHeight = 21;
+  const labelRect = placeInsightLabel(bbox, textWidth, labelHeight, labelRects, personRects);
+  labelRects.push(labelRect);
+  overlayCtx.globalAlpha = 0.96;
+  overlayCtx.fillStyle = outlineColor;
+  overlayCtx.fillRect(labelRect.x, labelRect.y, labelRect.w, labelRect.h);
   overlayCtx.fillStyle = "#ffffff";
-  overlayCtx.fillText(label.text, labelX + 7, labelY + 12.5);
+  overlayCtx.fillText(label.text, labelRect.x + 7, labelRect.y + 14.5);
   if (selected) {
     overlayCtx.strokeStyle = "rgba(255, 255, 255, 0.88)";
     overlayCtx.strokeRect(bbox.x - 3, bbox.y - 3, bbox.w + 6, bbox.h + 6);
   }
+  overlayCtx.restore();
+}
+
+function drawSceneObservation(text, rect) {
+  if (!text) return;
+  overlayCtx.save();
+  overlayCtx.font = "13px Inter, system-ui, sans-serif";
+  const label = String(text).slice(0, 72);
+  const textWidth = overlayCtx.measureText(label).width;
+  const width = Math.min(rect.width - 20, textWidth + 22);
+  const height = 30;
+  const x = 10;
+  const y = 10;
+  overlayCtx.globalAlpha = 0.88;
+  overlayCtx.fillStyle = "rgba(16, 24, 32, 0.86)";
+  overlayCtx.fillRect(x, y, width, height);
+  overlayCtx.fillStyle = "#ffffff";
+  overlayCtx.fillText(label, x + 11, y + 19);
   overlayCtx.restore();
 }
 
@@ -748,20 +1298,14 @@ function updateJourneyCache(events, source, rect) {
 }
 
 function registerBadges(events) {
-  const groupCounts = groupSizes(events);
   for (const event of events) {
-    const key = `${event.timestamp}:${event.event_type}:${event.visitor_id}:${event.group_id || ""}`;
+    let key = `${event.timestamp}:${event.event_type}:${event.visitor_id}:${event.group_id || ""}`;
     let badge = null;
-    if (overlayOptions.productEvents && event.event_type === "PRODUCT_INTERACTION") {
-      badge = { text: "Product Interest", detail: `${eventBusinessLabel(event).text} in ${zoneLabel(event.zone_id)}`, color: overlayColors.product, ttl: 2600 };
-    } else if (overlayOptions.productEvents && ["CHECKOUT_VISIT", "BILLING_QUEUE_JOIN"].includes(event.event_type)) {
-      badge = { text: "Checkout Visit", detail: `${eventBusinessLabel(event).text} approached checkout`, color: overlayColors.employee, ttl: 3000 };
-    } else if (event.event_type === "ZONE_DWELL" && Number(event.dwell_ms || 0) >= 3000) {
-      badge = { text: "High Purchase Intent", detail: `${eventBusinessLabel(event).text} dwell threshold crossed`, color: overlayColors.product, ttl: 3000 };
-    } else if (event.event_type === "REENTRY") {
-      badge = { text: "Returning Visitor", detail: `${eventBusinessLabel(event).text} returned at entrance`, color: overlayColors.returning, ttl: 4000 };
-    } else if (event.group_id && groupCounts[event.group_id] > 1) {
-      badge = { text: `Group of ${groupCounts[event.group_id]}`, detail: "Synchronized entry or movement", color: overlayColors.group, ttl: 3000 };
+    const insight = insightForEvent(event, events);
+    if (overlayOptions.productEvents && insight && ["product", "checkout", "intent", "staff", "exit"].includes(insight.kind)) {
+      if (!shouldShowInsight(insight)) continue;
+      key = `${event.visitor_id}:${insight.text}`;
+      badge = { text: insight.text, detail: zoneLabel(event.zone_id), color: insightColor(insight.kind), ttl: 3200 };
     }
     if (badge && !activeBadges.has(key)) {
       activeBadges.set(key, { ...badge, createdAt: performance.now() });
@@ -803,8 +1347,12 @@ function renderOverlay() {
   const events = currentOverlayEvents();
   const source = sourceDimensions(events);
   const groupCounts = groupSizes(events);
-  const labelRows = [];
+  const labelRects = [];
   const zoomedOut = rect.width < 520;
+  const personRects = events
+    .map((event) => parseMetadata(event).bbox)
+    .filter(Array.isArray)
+    .map((bbox) => canvasPointFromBBox(bbox, source, rect));
   updateJourneyCache(events, source, rect);
   drawZones(rect);
   drawHeatmap(rect);
@@ -814,9 +1362,12 @@ function renderOverlay() {
     if (!Array.isArray(bbox)) continue;
     const scaled = canvasPointFromBBox(bbox, source, rect);
     const label = eventBusinessLabel(event, groupCounts[event.group_id] || 0);
-    drawPerson(event, scaled, label, zoomedOut, labelRows);
+    drawPerson(event, scaled, label, zoomedOut, labelRects, personRects);
   }
-  registerBadges(events);
+  if (!events.length) {
+    drawSceneObservation(sceneObservationForSecond(), rect);
+  }
+  registerBadges(currentTimelineData.events || events);
   renderBadges();
 }
 
@@ -891,8 +1442,9 @@ async function refreshFunnel() {
                   (item) => `
                     <div class="attention-row">
                       <span>${item.visitor}</span>
-                      <div class="attention-track"><i style="width:${item.attention_score}%"></i></div>
+                      <div class="attention-track"><i style="width:${Math.max(3, Number(item.attention_score || 0))}%"></i></div>
                       <strong>${item.attention_score}</strong>
+                      <small>${formatAttentionDetail(item)}</small>
                     </div>
                   `
                 )
@@ -937,6 +1489,7 @@ function resetDashboard() {
   timelineStart = null;
   timelineRequestId += 1;
   lastRenderedSecond = null;
+  lastVideoTimelineSecond = null;
   currentTimelineData = null;
   currentMetrics = null;
   currentFunnel = null;
@@ -944,6 +1497,7 @@ function resetDashboard() {
   currentScore = null;
   hoverTarget = null;
   selectedVisitorId = null;
+  setVideoFocus(false);
   activeBadges.clear();
   journeyCache.clear();
   stopOverlayAnimation();
@@ -954,6 +1508,7 @@ function resetDashboard() {
   lowerEl.hidden = true;
   scorePanel.hidden = true;
   emptyState.hidden = false;
+  setProcessedState();
   metricsEl.innerHTML = "";
   summaryCards.innerHTML = "";
   document.querySelector("#events").innerHTML = "";
@@ -984,11 +1539,13 @@ function resetDashboard() {
   journeyReplay.innerHTML = "";
   setSystemStatus("Ready for analysis", "ready");
   if (downloadInsights) downloadInsights.disabled = true;
+  if (saveReview) saveReview.disabled = true;
   setVideoPlaybackButton();
   renderOverlay();
 }
 
 function showDashboard() {
+  setProcessedState();
   hasProcessedInput = true;
   metricsEl.hidden = false;
   executiveSummary.hidden = false;
@@ -997,21 +1554,28 @@ function showDashboard() {
   scorePanel.hidden = false;
   emptyState.hidden = true;
   if (downloadInsights) downloadInsights.disabled = false;
+  if (saveReview) saveReview.disabled = false;
   startOverlayAnimation();
 }
 
 document.querySelector("#runDemo").addEventListener("click", async () => {
-  showDashboard();
-  summary.textContent = "Generating and processing sample CCTV footage...";
-  setSystemStatus("Processing demo video", "working");
-  await getJson("/demo/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ store_id: storeId(), duration_sec: 8, fps: 10 }),
-  });
-  uploadStatus.textContent = "Demo video processed. Use this when you want sample data without uploading your own MP4.";
-  await refreshAll();
-  setSystemStatus("Insights live", "live");
+  setProcessingState("Processing demo CCTV through the analytics agents...");
+  try {
+    await getJson("/demo/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ store_id: storeId(), duration_sec: 8, fps: 10 }),
+      timeoutMs: DEMO_TIMEOUT_MS,
+    });
+    uploadStatus.textContent = "Demo video processed. Use this when you want sample data without uploading your own MP4.";
+    showDashboard();
+    await refreshAll();
+    await refreshSavedReviews();
+    setSystemStatus("Insights live", "live");
+  } catch (error) {
+    uploadStatus.textContent = error.message;
+    setProcessingFailedState(error.message);
+  }
 });
 
 videoUpload.addEventListener("change", () => {
@@ -1031,21 +1595,23 @@ processUpload.addEventListener("click", async () => {
   formData.append("file", file);
   formData.append("store_id", storeId());
   formData.append("camera_id", "CAM_UPLOAD_01");
-  showDashboard();
+  setProcessingState("Processing uploaded CCTV through the analytics agents...");
   processUpload.disabled = true;
   uploadStatus.textContent = "Processing video through input, analyzer, event, memory, and API agents...";
-  setSystemStatus("Processing uploaded video", "working");
   try {
     const result = await getJson("/videos/upload", {
       method: "POST",
       body: formData,
+      timeoutMs: REQUEST_TIMEOUT_MS,
     });
     uploadStatus.textContent = `${result.events_inserted} events processed from ${result.input.duration_sec}s of video.`;
+    showDashboard();
     await refreshAll();
+    await refreshSavedReviews();
     setSystemStatus("Insights live", "live");
   } catch (error) {
     uploadStatus.textContent = error.message;
-    resetDashboard();
+    setProcessingFailedState(error.message);
   } finally {
     processUpload.disabled = false;
   }
@@ -1079,7 +1645,12 @@ toggleVideoPlayback?.addEventListener("click", async () => {
     setVideoPlaybackButton();
   }
 });
+toggleVideoFocus?.addEventListener("click", () => {
+  setVideoFocus(!videoFocusEnabled);
+});
 downloadInsights?.addEventListener("click", downloadInsightsCsv);
+saveReview?.addEventListener("click", saveCurrentReview);
+loadReview?.addEventListener("click", loadSavedReview);
 document.querySelectorAll("[data-overlay-toggle]").forEach((toggle) => {
   toggle.addEventListener("change", () => {
     overlayOptions[toggle.dataset.overlayToggle] = toggle.checked;
@@ -1127,5 +1698,7 @@ window.addEventListener("resize", renderOverlay);
 storeInput.addEventListener("change", () => {
   hasProcessedInput = false;
   resetDashboard();
+  refreshSavedReviews();
 });
 resetDashboard();
+refreshSavedReviews();

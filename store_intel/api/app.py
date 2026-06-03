@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import shutil
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,7 @@ from store_intel.agents.memory_store import MemoryEventStoreAgent
 from store_intel.agents.metrics_agent import IntelligenceMetricsAgent
 from store_intel.agents.query_agent import TimestampQueryAgent
 from store_intel.agents.score_agent import AgentScoreAgent
-from store_intel.schemas import EventBatch
+from store_intel.schemas import EventBatch, StoreEvent
 
 
 def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
@@ -28,6 +30,7 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
     metrics = IntelligenceMetricsAgent(store)
     query = TimestampQueryAgent(store)
     scorer = AgentScoreAgent(store)
+    review_cache: dict[str, dict[str, Any]] = {}
 
     @app.middleware("http")
     async def log_requests(request, call_next):
@@ -129,6 +132,78 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
             fps=int(payload.get("fps", 10)),
         )
 
+    @app.get("/demo/reviews")
+    def saved_demo_reviews(store_id: str = "STORE_BLR_002") -> dict[str, Any]:
+        reviews = [
+            _review_summary(review)
+            for review in review_cache.values()
+            if review["store_id"] == store_id and Path(review["video_path"]).exists()
+        ]
+        reviews.sort(key=lambda review: review["saved_at"], reverse=True)
+        return {"store_id": store_id, "reviews": reviews}
+
+    @app.post("/demo/reviews")
+    def save_demo_review(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        store_id = payload.get("store_id", "STORE_BLR_002")
+        current = store.current_video(store_id)
+        if not current or not Path(current["video_path"]).exists():
+            raise HTTPException(status_code=404, detail="No processed CCTV video is available to save.")
+        title = str(payload.get("title") or f"CCTV Review {current['updated_at']}")
+        events = store.rows("SELECT * FROM events WHERE store_id = ? ORDER BY timestamp, event_id", (store_id,))
+        if not events:
+            raise HTTPException(status_code=400, detail="No analyzed events are available to save.")
+        signature = _review_signature(store_id, current, events)
+        for review in review_cache.values():
+            if review["signature"] == signature:
+                return _review_summary(review)
+        saved_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        review_id = f"REV_{store_id}_{saved_at}".replace(":", "").replace("-", "").replace(".", "")
+        review_cache[review_id] = {
+            "review_id": review_id,
+            "signature": signature,
+            "store_id": store_id,
+            "title": title,
+            "video_path": str(Path(current["video_path"]).resolve()),
+            "camera_id": current["camera_id"],
+            "duration_sec": int(current["duration_sec"]),
+            "fps": int(current["fps"]),
+            "updated_at": current["updated_at"],
+            "saved_at": saved_at,
+            "events": [MemoryEventStoreAgent._event_row_to_payload(event) for event in events],
+        }
+        return _review_summary(review_cache[review_id])
+
+    @app.post("/demo/reviews/{review_id}/load")
+    def load_demo_review(review_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        store_id = payload.get("store_id", "STORE_BLR_002")
+        try:
+            review = review_cache[review_id]
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Saved CCTV review was not found in the temporary cache.") from exc
+        if review["store_id"] != store_id or not Path(review["video_path"]).exists():
+            raise HTTPException(status_code=404, detail="Saved CCTV review is no longer available in the temporary cache.")
+        events = [StoreEvent(**event) for event in review["events"]]
+        store.clear_store(store_id)
+        inserted = store.ingest_events(events)
+        store.set_current_video(
+            store_id=store_id,
+            video_path=review["video_path"],
+            camera_id=review["camera_id"],
+            duration_sec=int(review["duration_sec"]),
+            fps=int(review["fps"]),
+            updated_at=review["updated_at"],
+        )
+        return {
+            "review_id": review_id,
+            "store_id": store_id,
+            "title": review["title"],
+            "events_inserted": inserted,
+            "duration_sec": int(review["duration_sec"]),
+            "fps": int(review["fps"]),
+        }
+
     @app.get("/stores/{store_id}/metrics")
     def store_metrics(store_id: str) -> dict[str, Any]:
         return metrics.metrics(store_id)
@@ -184,11 +259,13 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
     @app.get("/stores/{store_id}/video/current")
     def current_video(store_id: str) -> dict[str, Any]:
         video = store.current_video(store_id)
-        if not video or not Path(video["video_path"]).exists():
+        video_path = Path(video["video_path"]) if video else None
+        if not video or not video_path or not video_path.exists():
             raise HTTPException(status_code=404, detail="No processed video is available for this store.")
         import cv2
 
-        capture = cv2.VideoCapture(video["video_path"])
+        stat = video_path.stat()
+        capture = cv2.VideoCapture(str(video_path))
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         capture.release()
@@ -200,6 +277,7 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
             "width": width,
             "height": height,
             "updated_at": video["updated_at"],
+            "cache_key": f"{stat.st_mtime_ns}-{stat.st_size}",
             "video_url": f"/stores/{store_id}/video/stream",
             "poster_url": f"/stores/{store_id}/video/poster",
             "frame_url": f"/stores/{store_id}/video/frame",
@@ -250,6 +328,37 @@ def _safe_event_count(store: MemoryEventStoreAgent) -> int:
     except Exception:
         logging.exception("health.event_count_unavailable")
         return 0
+
+
+def _review_signature(store_id: str, video: dict[str, Any], events: list[dict[str, Any]]) -> str:
+    event_ids = [event["event_id"] for event in events]
+    payload = {
+        "store_id": store_id,
+        "video_path": str(Path(video["video_path"]).resolve()),
+        "updated_at": video["updated_at"],
+        "duration_sec": video["duration_sec"],
+        "fps": video["fps"],
+        "event_count": len(event_ids),
+        "first_event": event_ids[0] if event_ids else "",
+        "last_event": event_ids[-1] if event_ids else "",
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _review_summary(review: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "review_id": review["review_id"],
+        "store_id": review["store_id"],
+        "title": review["title"],
+        "video_path": review["video_path"],
+        "camera_id": review["camera_id"],
+        "duration_sec": review["duration_sec"],
+        "fps": review["fps"],
+        "updated_at": review["updated_at"],
+        "saved_at": review["saved_at"],
+        "events": len(review["events"]),
+        "cache": "temporary",
+    }
 
 
 app = create_app(os.getenv("STORE_INTEL_DB_PATH", "data/store_intel.db"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,19 @@ class MemoryEventStoreAgent:
                   duration_sec INTEGER NOT NULL,
                   fps INTEGER NOT NULL,
                   updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS saved_reviews (
+                  review_id TEXT PRIMARY KEY,
+                  store_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  video_path TEXT NOT NULL,
+                  camera_id TEXT NOT NULL,
+                  duration_sec INTEGER NOT NULL,
+                  fps INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  saved_at TEXT NOT NULL,
+                  events_json TEXT NOT NULL
                 );
                 """
             )
@@ -513,3 +527,123 @@ class MemoryEventStoreAgent:
     def current_video(self, store_id: str) -> dict[str, Any] | None:
         rows = self.rows("SELECT * FROM processed_videos WHERE store_id = ?", (store_id,))
         return rows[0] if rows else None
+
+    def save_review(
+        self,
+        store_id: str,
+        title: str,
+        video_path: str,
+        camera_id: str,
+        duration_sec: int,
+        fps: int,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        events = self.rows("SELECT * FROM events WHERE store_id = ? ORDER BY timestamp, event_id", (store_id,))
+        if not events:
+            raise ValueError("No analyzed events are available to save.")
+        saved_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        review_id = f"REV_{store_id}_{saved_at}".replace(":", "").replace("-", "").replace(".", "")
+        normalized_events = [self._event_row_to_payload(event) for event in events]
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO saved_reviews(review_id, store_id, title, video_path, camera_id, duration_sec, fps, updated_at, saved_at, events_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(review_id) DO UPDATE SET
+                  title = excluded.title,
+                  video_path = excluded.video_path,
+                  camera_id = excluded.camera_id,
+                  duration_sec = excluded.duration_sec,
+                  fps = excluded.fps,
+                  updated_at = excluded.updated_at,
+                  saved_at = excluded.saved_at,
+                  events_json = excluded.events_json
+                """,
+                (
+                    review_id,
+                    store_id,
+                    title,
+                    video_path,
+                    camera_id,
+                    duration_sec,
+                    fps,
+                    updated_at,
+                    saved_at,
+                    json.dumps(normalized_events),
+                ),
+            )
+        return {
+            "review_id": review_id,
+            "store_id": store_id,
+            "title": title,
+            "video_path": video_path,
+            "camera_id": camera_id,
+            "duration_sec": duration_sec,
+            "fps": fps,
+            "updated_at": updated_at,
+            "saved_at": saved_at,
+            "events": len(normalized_events),
+        }
+
+    def saved_reviews(self, store_id: str) -> list[dict[str, Any]]:
+        rows = self.rows(
+            """
+            SELECT review_id, store_id, title, video_path, camera_id, duration_sec, fps, updated_at, saved_at, events_json
+            FROM saved_reviews
+            WHERE store_id = ?
+            ORDER BY saved_at DESC
+            """,
+            (store_id,),
+        )
+        for row in rows:
+            row["events"] = len(json.loads(row.pop("events_json") or "[]"))
+        return rows
+
+    def load_review(self, store_id: str, review_id: str) -> dict[str, Any]:
+        rows = self.rows("SELECT * FROM saved_reviews WHERE store_id = ? AND review_id = ?", (store_id, review_id))
+        if not rows:
+            raise ValueError("Saved CCTV review was not found.")
+        review = rows[0]
+        events = [StoreEvent(**event) for event in json.loads(review["events_json"] or "[]")]
+        self.clear_store(store_id)
+        inserted = self.ingest_events(events)
+        self.set_current_video(
+            store_id=store_id,
+            video_path=review["video_path"],
+            camera_id=review["camera_id"],
+            duration_sec=int(review["duration_sec"]),
+            fps=int(review["fps"]),
+            updated_at=review["updated_at"],
+        )
+        return {
+            "review_id": review_id,
+            "store_id": store_id,
+            "title": review["title"],
+            "events_inserted": inserted,
+            "duration_sec": int(review["duration_sec"]),
+            "fps": int(review["fps"]),
+        }
+
+    @staticmethod
+    def _event_row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+        metadata = row.get("metadata") or "{}"
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata or "{}")
+        return {
+            "event_id": row["event_id"],
+            "store_id": row["store_id"],
+            "camera_id": row["camera_id"],
+            "visitor_id": row["visitor_id"],
+            "video_time_sec": row.get("video_time_sec"),
+            "frame_id": row.get("frame_id"),
+            "track_id": row.get("track_id"),
+            "group_id": row.get("group_id"),
+            "role": row.get("role") or "customer",
+            "event_type": row["event_type"],
+            "timestamp": row["timestamp"],
+            "zone_id": row.get("zone_id"),
+            "dwell_ms": row.get("dwell_ms"),
+            "is_staff": bool(row.get("is_staff")),
+            "confidence": float(row["confidence"]),
+            "metadata": metadata,
+        }

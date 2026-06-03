@@ -32,8 +32,8 @@ def test_api_ingests_events_and_returns_timeline_summary(tmp_path):
     body = timeline.json()
     assert body["active_visitors"] == 1
     assert body["zone_activity"]["ENTRY"] == 1
-    assert body["summary"] == "1 customer visible: 1 in Entry."
-    assert body["display_events"][0]["headline"] == "Currently in Entry"
+    assert body["summary"] == "1 customer visible: 1 in Entrance."
+    assert body["display_events"][0]["headline"] == "Currently in Entrance"
     assert body["raw_display_events"][0]["headline"] == "Customer entered store"
 
 
@@ -216,6 +216,60 @@ def test_processed_video_is_available_for_preview(tmp_path):
     assert frame.status_code == 200
     assert frame.headers["content-type"] == "image/jpeg"
     assert len(frame.content) > 1000
+
+
+def test_processed_video_can_be_saved_and_loaded_without_reprocessing(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORE_INTEL_UPLOAD_DIR", str(tmp_path / "uploads"))
+    client = TestClient(create_app(db_path=tmp_path / "events.db"))
+    video = create_demo_video(tmp_path / "demo.mp4", duration_sec=2, fps=5)
+
+    with video.open("rb") as handle:
+        upload = client.post(
+            "/videos/upload",
+            data={"store_id": "STORE_BLR_002", "camera_id": "CAM_ENTRY_01"},
+            files={"file": ("demo.mp4", handle, "video/mp4")},
+        )
+
+    assert upload.status_code == 200
+    original_events = upload.json()["events_inserted"]
+    save = client.post("/demo/reviews", json={"store_id": "STORE_BLR_002", "title": "Morning floor review"})
+    assert save.status_code == 200
+    saved = save.json()
+    assert saved["events"] == original_events
+    assert saved["title"] == "Morning floor review"
+    assert saved["cache"] == "temporary"
+    duplicate_save = client.post("/demo/reviews", json={"store_id": "STORE_BLR_002", "title": "Morning floor review"})
+    assert duplicate_save.status_code == 200
+    assert duplicate_save.json()["review_id"] == saved["review_id"]
+
+    reviews = client.get("/demo/reviews", params={"store_id": "STORE_BLR_002"})
+    assert reviews.status_code == 200
+    assert len(reviews.json()["reviews"]) == 1
+    assert reviews.json()["reviews"][0]["review_id"] == saved["review_id"]
+
+    client.post(
+        "/events/ingest",
+        json={
+            "events": [
+                {
+                    "event_id": "EVT_other_store_noise",
+                    "store_id": "STORE_OTHER",
+                    "camera_id": "CAM_X",
+                    "visitor_id": "VIS_X",
+                    "event_type": "ENTRY",
+                    "timestamp": "2026-03-03T14:30:10Z",
+                    "zone_id": "ENTRY",
+                    "confidence": 0.9,
+                    "metadata": {},
+                }
+            ]
+        },
+    )
+    load = client.post(f"/demo/reviews/{saved['review_id']}/load", json={"store_id": "STORE_BLR_002"})
+    assert load.status_code == 200
+    assert load.json()["events_inserted"] == original_events
+    assert client.get("/stores/STORE_BLR_002/metrics").json()["events"] == original_events
+    assert client.get("/stores/STORE_BLR_002/video/current").status_code == 200
 
 
 def test_agent_score_uses_weighted_formula_after_processing(tmp_path):
@@ -450,10 +504,11 @@ def test_timeline_heatmap_counts_current_zone_presence_not_raw_events(tmp_path):
     ).json()
 
     assert body["zone_activity"] == {"ENTRY": 1}
-    assert body["display_events"][0]["headline"] == "Currently in Entry"
-    assert body["raw_display_events"][0]["headline"] == "Moved out of Billing"
-    assert body["raw_display_events"][1]["headline"] == "Moved into Entry"
-    assert body["raw_display_events"][2]["headline"] == "Dwelling in Entry"
+    assert body["active_events"][0]["event_type"] == "ZONE_DWELL"
+    assert body["display_events"][0]["headline"] == "Currently in Entrance"
+    assert body["raw_display_events"][0]["headline"] == "Moved out of Checkout"
+    assert body["raw_display_events"][1]["headline"] == "Moved into Entrance"
+    assert body["raw_display_events"][2]["headline"] == "Dwelling in Entrance"
 
 
 def test_timeline_returns_one_display_row_per_current_visitor_state(tmp_path):
@@ -510,9 +565,9 @@ def test_timeline_returns_one_display_row_per_current_visitor_state(tmp_path):
         params={"timestamp": "2026-03-03T14:22:11Z"},
     ).json()
 
-    assert body["summary"] == "2 customers visible: 1 in Entry, 1 in Aisle A."
+    assert body["summary"] == "2 customers visible: 1 in Entrance, 1 in Aisle A."
     assert body["zone_activity"] == {"ENTRY": 1, "AISLE_A": 1}
     assert [event["headline"] for event in body["display_events"]] == [
-        "Currently in Entry",
+        "Currently in Entrance",
         "Currently in Aisle A",
     ]

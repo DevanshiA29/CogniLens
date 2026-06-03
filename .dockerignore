@@ -19,9 +19,17 @@ env
 node_modules
 data
 uploads
+runtime
+docs/assets
 *.db
 *.sqlite
 *.sqlite3
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+!samples/demo_cctv.mp4
 yolov8*.pt
 *.onnx
 tests/__pycache__

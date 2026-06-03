@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from store_intel.agents.memory_store import MemoryEventStoreAgent
@@ -14,6 +15,7 @@ class TimestampQueryAgent:
 
     def at_timestamp(self, store_id: str, timestamp: str) -> dict[str, Any]:
         normalized = normalize_timestamp(timestamp)
+        active_events = self._active_events_near_timestamp(store_id, normalized)
         events = self.store.rows(
             """
             SELECT * FROM events
@@ -22,12 +24,13 @@ class TimestampQueryAgent:
             """,
             (store_id, normalized),
         )
-        zone_counts = self._current_zone_counts(events)
-        active_customers = {event["visitor_id"] for event in events if not event["is_staff"]}
-        active_staff = {event["visitor_id"] for event in events if event["is_staff"]}
+        zone_counts = self._current_zone_counts(active_events)
+        customer_zone_counts = self._current_zone_counts([event for event in active_events if not event["is_staff"]])
+        active_customers = {event["visitor_id"] for event in active_events if not event["is_staff"]}
+        active_staff = {event["visitor_id"] for event in active_events if event["is_staff"]}
         queue_depth = sum(1 for event in events if event["event_type"] == "BILLING_QUEUE_JOIN")
-        visitor_states = self._visitor_states(events)
-        summary = self._summary(events, len(active_customers), len(active_staff), queue_depth, zone_counts)
+        visitor_states = self._visitor_states(active_events)
+        summary = self._summary(active_events or events, len(active_customers), len(active_staff), queue_depth, customer_zone_counts)
         return {
             "timestamp": normalized,
             "summary": summary,
@@ -35,6 +38,7 @@ class TimestampQueryAgent:
             "staff_detected": len(active_staff),
             "zone_activity": zone_counts,
             "events": events,
+            "active_events": active_events,
             "visitor_states": visitor_states,
             "display_events": [self._display_state(state) for state in visitor_states],
             "raw_display_events": [self._display_event(event) for event in events],
@@ -81,7 +85,7 @@ class TimestampQueryAgent:
         exits = sum(1 for event in events if event["event_type"] == "EXIT" and not event["is_staff"])
         parts: list[str] = []
         if active_customers and zone_counts:
-            zone_order = {"ENTRY": 0, "AISLE_A": 1, "BILLING": 2}
+            zone_order = {"ENTRY": 0, "WALL_PRODUCTS": 1, "PRODUCT_AISLE": 2, "CENTER_DISPLAY": 3, "BILLING": 4, "PMU": 5}
             zone_parts = [
                 f"{count} in {TimestampQueryAgent._zone_label(zone_id)}"
                 for zone_id, count in sorted(zone_counts.items(), key=lambda item: zone_order.get(item[0], 99))
@@ -130,9 +134,52 @@ class TimestampQueryAgent:
             for event in sorted(state_events.values(), key=lambda item: item["visitor_id"])
         ]
 
+    def _active_events_near_timestamp(self, store_id: str, normalized: str) -> list[dict[str, Any]]:
+        target = parse_timestamp(normalized)
+        start = normalize_timestamp(target - timedelta(seconds=3))
+        rows = self.store.rows(
+            """
+            SELECT * FROM events
+            WHERE store_id = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp, event_id
+            """,
+            (store_id, start, normalized),
+        )
+        state_events: dict[str, dict[str, Any]] = {}
+        priority = {
+            "ZONE_DWELL": 6,
+            "CHECKOUT_VISIT": 5,
+            "BILLING_QUEUE_JOIN": 5,
+            "PRODUCT_INTERACTION": 4,
+            "ZONE_ENTER": 3,
+            "REENTRY": 2,
+            "ENTRY": 1,
+        }
+        for event in rows:
+            visitor_id = event["visitor_id"]
+            event_type = event["event_type"]
+            if event_type in {"EXIT", "BILLING_QUEUE_ABANDON"}:
+                state_events.pop(visitor_id, None)
+                continue
+            if event_type not in priority or not event["zone_id"]:
+                continue
+            existing = state_events.get(visitor_id)
+            if not existing:
+                state_events[visitor_id] = event
+                continue
+            existing_time = parse_timestamp(existing["timestamp"])
+            event_time = parse_timestamp(event["timestamp"])
+            if event_time > existing_time or (
+                event_time == existing_time and priority[event_type] >= priority.get(existing["event_type"], 0)
+            ):
+                state_events[visitor_id] = event
+        return sorted(state_events.values(), key=lambda event: (event["camera_id"], event["visitor_id"]))
+
     @staticmethod
     def _display_state(state: dict[str, Any]) -> dict[str, Any]:
-        role = "Staff" if state["is_staff"] else "Customer"
+        role = "Employee" if state["is_staff"] else "Customer"
         return {
             "event_id": state["visitor_id"],
             "headline": f"Currently in {state['zone']}",
@@ -191,18 +238,22 @@ class TimestampQueryAgent:
     @staticmethod
     def _zone_label(zone_id: str | None) -> str:
         labels = {
-            "ENTRY": "Entry",
-            "AISLE_A": "Aisle A",
-            "BILLING": "Billing",
+            "ENTRY": "Entrance",
             "EXIT": "Exit",
-            "UNKNOWN": "Unknown Zone",
+            "AISLE_A": "Aisle A",
+            "WALL_PRODUCTS": "Wall Products",
+            "PRODUCT_AISLE": "Product Aisle",
+            "CENTER_DISPLAY": "Center Display",
+            "BILLING": "Checkout",
+            "PMU": "PMU Service",
+            "UNKNOWN": "Store Floor",
         }
         if not zone_id:
-            return "Unknown Zone"
+            return "Store Floor"
         return labels.get(zone_id, zone_id.replace("_", " ").title())
 
     @staticmethod
     def _visitor_label(visitor_id: str, is_staff: bool) -> str:
-        role = "Staff" if is_staff else "Customer"
+        role = "Employee" if is_staff else "Customer"
         suffix = visitor_id.rsplit("_", 1)[-1]
         return f"{role} {suffix}"

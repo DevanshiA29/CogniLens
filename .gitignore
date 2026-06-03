@@ -24,6 +24,8 @@ data/
 *.sqlite
 *.sqlite3
 uploads/
+runtime/
+docs/assets/
 
 # Large local media/model artifacts. Keep the tiny bundled demo clip.
 *.mp4

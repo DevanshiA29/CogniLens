@@ -2,7 +2,7 @@
 
 End-to-end CCTV-to-retail-analytics system with separate agents for input, frame analysis, event generation, event memory, timestamp queries, APIs, and dashboard output.
 
-![Dashboard homepage](docs/assets/home.png)
+Dashboard preview: run the app and open `http://localhost:8000` to view the live CogniLens interface. Local CCTV uploads and runtime databases are intentionally excluded from the repository.
 
 ## What It Does
 
@@ -32,7 +32,11 @@ Open `http://127.0.0.1:8000`, then click **Use Demo Video**.
 
 ## Run With Docker
 
+This is the reviewer path. After cloning the repository, no database seed, model download, local video copy, or manual frontend build is required:
+
 ```bash
+git clone <your-repo-url>
+cd <your-project>
 docker compose up --build
 ```
 
@@ -42,7 +46,7 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-The container starts the full FastAPI app and serves the dashboard, metrics API, funnel API, video upload/analysis flow, and canvas annotations without any manual setup. Click **Use Demo Video** to generate a sample CCTV clip and populate the dashboard.
+The container starts the full FastAPI app and serves the dashboard, metrics API, funnel API, video upload/analysis flow, and canvas annotations without any manual setup. Click **Use Demo Video** to process the bundled demo CCTV clip and populate the dashboard.
 
 Docker details:
 
@@ -54,10 +58,18 @@ Docker details:
   - `store_intel_data` -> `/app/data`
   - `store_intel_uploads` -> `/app/uploads`
 - Healthcheck: `GET /health`
+- Bundled demo: `samples/demo_cctv.mp4` is copied into the image so the demo button works immediately after clone.
 - Default environment:
   - `STORE_INTEL_DB_PATH=/app/data/store_intel.db`
   - `STORE_INTEL_UPLOAD_DIR=/app/uploads`
   - `STORE_INTEL_USE_YOLO=0`
+  - `STORE_INTEL_MAX_ANALYSIS_SECONDS=180`
+
+Deployment processing guardrails:
+
+- Browser requests abort with a clear message instead of staying in an infinite processing state.
+- The backend caps each uploaded video analysis window with `STORE_INTEL_MAX_ANALYSIS_SECONDS`; raise this value on larger paid Render instances if you want deeper clips.
+- Container logs print orchestration checkpoints like `[STEP 3/6] Agent [FrameAnalyzerAgent] initiating tool [analyze_video]`.
 
 Useful checks after startup:
 

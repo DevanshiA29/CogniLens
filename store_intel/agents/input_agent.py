@@ -50,18 +50,37 @@ class InputAgent:
         path = Path(layout_path)
         if not path.exists():
             return self.default_layout()
+        if path.suffix.lower() in {".xlsx", ".xls"}:
+            return self._layout_from_workbook(path)
         return json.loads(path.read_text())
 
     @staticmethod
     def default_layout() -> dict[str, Any]:
         return {
             "zones": {
-                "ENTRY": {"x1": 0.0, "y1": 0.0, "x2": 0.35, "y2": 1.0},
-                "AISLE_A": {"x1": 0.35, "y1": 0.0, "x2": 0.72, "y2": 1.0},
-                "BILLING": {"x1": 0.72, "y1": 0.0, "x2": 1.0, "y2": 1.0},
+                "ENTRY": {"x1": 0.0, "y1": 0.34, "x2": 0.18, "y2": 0.96},
+                "EXIT": {"x1": 0.0, "y1": 0.42, "x2": 0.16, "y2": 1.0},
+                "WALL_PRODUCTS": {"x1": 0.1, "y1": 0.0, "x2": 0.88, "y2": 0.22},
+                "PRODUCT_AISLE": {"x1": 0.13, "y1": 0.72, "x2": 0.86, "y2": 1.0},
+                "CENTER_DISPLAY": {"x1": 0.32, "y1": 0.34, "x2": 0.66, "y2": 0.72},
+                "BILLING": {"x1": 0.82, "y1": 0.22, "x2": 0.96, "y2": 0.78},
+                "PMU": {"x1": 0.9, "y1": 0.58, "x2": 1.0, "y2": 0.9},
             },
-            "staff_zones": ["BILLING"],
+            "entry_zones": ["ENTRY"],
+            "exit_zones": ["EXIT"],
+            "product_zones": ["WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY"],
+            "staff_zones": ["BILLING", "PMU"],
+            "staff_service_zones": ["BILLING", "PMU"],
+            "layout_name": "Brigade Road",
         }
+
+    def _layout_from_workbook(self, path: Path) -> dict[str, Any]:
+        # The Brigade Road workbook stores the floor plan as an embedded image,
+        # so we map its visible door, product assets, cash counter, and PMU into
+        # normalized camera zones.
+        layout = self.default_layout()
+        layout["source_layout"] = str(path)
+        return layout
 
     @staticmethod
     def _video_id(path: Path) -> str:
