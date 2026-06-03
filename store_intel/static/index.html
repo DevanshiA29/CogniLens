@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agentic Store Intelligence</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260602-4" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Agentic Store Intelligence</h1>
+        <p>Live CCTV-to-events retail analytics</p>
+      </div>
+      <div class="actions">
+        <input id="storeId" value="STORE_BLR_002" />
+        <button id="runDemo" title="Generate sample CCTV and process it when you do not have an MP4 ready">Use Demo Video</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="upload-panel">
+        <div>
+          <h2>Upload CCTV MP4</h2>
+          <p id="uploadStatus">Select a store camera clip and process it through the analytics agents.</p>
+        </div>
+        <label class="file-button" for="videoUpload">Choose MP4</label>
+        <input id="videoUpload" type="file" accept="video/mp4,.mp4" />
+        <button id="processUpload" disabled>Process Video</button>
+      </section>
+
+      <section class="metrics" id="metrics" hidden></section>
+
+      <section id="executiveSummary" class="executive-summary" hidden>
+        <div class="panel-head">
+          <h2>AI Store Manager Summary</h2>
+        </div>
+        <div id="summaryCards" class="summary-cards"></div>
+      </section>
+
+      <section id="emptyState" class="empty-state">
+        <h2>No Video Processed</h2>
+        <p>Upload an MP4 or click Use Demo Video to run the agents and display verified analytics.</p>
+      </section>
+
+      <section id="scorePanel" class="score-panel" hidden>
+        <div>
+          <h2>Agent Analysis Score</h2>
+          <span id="scoreLabel" class="score-label">Self-Evaluation Based on Rubric</span>
+          <p id="scoreFormula">Total = Detection (30) + API (35) + Production (20) + Thinking (15)</p>
+        </div>
+        <strong id="scoreTotal">0 / 100</strong>
+        <div id="scoreBreakdown" class="score-breakdown"></div>
+        <div id="scoreEvidence" class="score-evidence"></div>
+      </section>
+
+      <section class="workspace" hidden>
+        <div class="video-panel">
+          <div class="panel-head">
+            <h2>Video Preview</h2>
+            <span id="videoMeta">No video loaded</span>
+          </div>
+          <div id="videoStage" class="video-stage">
+            <video id="videoPreview" controls muted playsinline preload="metadata"></video>
+            <canvas id="retailOverlayCanvas" aria-label="Retail analytics overlay"></canvas>
+            <div id="overlayBadges" class="overlay-badges"></div>
+            <div id="overlayTooltip" class="overlay-tooltip" hidden></div>
+          </div>
+          <div class="overlay-controls" aria-label="Overlay controls">
+            <label><input type="checkbox" data-overlay-toggle="customers" checked /> Customers</label>
+            <label><input type="checkbox" data-overlay-toggle="employees" checked /> Employees</label>
+            <label><input type="checkbox" data-overlay-toggle="productEvents" checked /> Product Events</label>
+            <label><input type="checkbox" data-overlay-toggle="heatmap" /> Heatmap</label>
+            <label><input type="checkbox" data-overlay-toggle="journeyPaths" checked /> Journey Paths</label>
+            <label><input type="checkbox" data-overlay-toggle="anomalies" checked /> AI Insights</label>
+          </div>
+          <details id="advancedDebug" class="advanced-debug">
+            <summary>Advanced / Debug Details</summary>
+            <div id="debugMeta">No internal metadata available.</div>
+          </details>
+          <div id="journeyReplay" class="journey-replay" hidden></div>
+        </div>
+
+        <div class="timeline">
+          <div class="panel-head">
+            <h2>Customer Activity Timeline</h2>
+            <time id="selectedTime">2026-03-03T14:22:10Z</time>
+          </div>
+          <input id="slider" type="range" min="0" max="20" value="0" />
+          <p id="summary" class="summary">Move the slider or run the demo.</p>
+          <div id="events" class="events"></div>
+        </div>
+
+        <div class="heatmap">
+          <div class="panel-head">
+            <h2>Most Popular Store Areas</h2>
+          </div>
+          <div id="heatmap" class="zones"></div>
+        </div>
+      </section>
+
+      <section class="lower" hidden>
+        <div>
+          <div class="panel-head">
+            <h2>Customer Conversion Journey</h2>
+          </div>
+          <div id="funnel" class="funnel"></div>
+        </div>
+        <div>
+          <div class="panel-head">
+            <h2>AI Insights & Alerts</h2>
+          </div>
+          <div id="anomalies" class="anomalies"></div>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=20260602-4"></script>
+  </body>
+</html>

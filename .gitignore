@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Python/local tooling
+*.pyo
+*.pyd
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Runtime persistence
+data/
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+
+# Large local media/model artifacts. Keep the tiny bundled demo clip.
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+!samples/demo_cctv.mp4
+yolov8*.pt
+*.onnx
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
