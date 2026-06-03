@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +14,6 @@ from store_intel.agents.memory_store import MemoryEventStoreAgent
 from store_intel.agents.metrics_agent import IntelligenceMetricsAgent
 from store_intel.agents.query_agent import TimestampQueryAgent
 from store_intel.agents.score_agent import AgentScoreAgent
-from store_intel.pipeline import StoreIntelligencePipeline
 from store_intel.schemas import EventBatch
 
 
@@ -54,7 +52,7 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
         return {
             "status": "ok",
             "database": str(store.db_path),
-            "events": store.count("events"),
+            "events": _safe_event_count(store),
             "agents": [
                 "InputAgent",
                 "FrameAnalyzerAgent",
@@ -86,6 +84,8 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
         target = upload_dir / Path(file.filename).name
         with target.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
+        from store_intel.pipeline import StoreIntelligencePipeline
+
         pipeline = StoreIntelligencePipeline(store.db_path)
         try:
             return pipeline.process_video(target, store_id, camera_id, replace_store=True)
@@ -94,6 +94,8 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
 
     @app.post("/videos/local")
     def process_local(payload: dict[str, Any]) -> dict[str, Any]:
+        from store_intel.pipeline import StoreIntelligencePipeline
+
         pipeline = StoreIntelligencePipeline(store.db_path)
         path = payload["path"]
         store_id = payload.get("store_id", "STORE_BLR_002")
@@ -116,6 +118,8 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
     @app.post("/demo/run")
     def run_demo(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
+        from store_intel.pipeline import StoreIntelligencePipeline
+
         pipeline = StoreIntelligencePipeline(store.db_path)
         store.clear_store(payload.get("store_id", "STORE_BLR_002"))
         return pipeline.run_demo(
@@ -182,6 +186,8 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
         video = store.current_video(store_id)
         if not video or not Path(video["video_path"]).exists():
             raise HTTPException(status_code=404, detail="No processed video is available for this store.")
+        import cv2
+
         capture = cv2.VideoCapture(video["video_path"])
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
@@ -218,6 +224,8 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
         video = store.current_video(store_id)
         if not video or not Path(video["video_path"]).exists():
             raise HTTPException(status_code=404, detail="No processed video is available for this store.")
+        import cv2
+
         capture = cv2.VideoCapture(video["video_path"])
         fps = capture.get(cv2.CAP_PROP_FPS) or float(video.get("fps") or 1)
         total_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT) or 1
@@ -234,6 +242,14 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
         return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
     return app
+
+
+def _safe_event_count(store: MemoryEventStoreAgent) -> int:
+    try:
+        return store.count("events")
+    except Exception:
+        logging.exception("health.event_count_unavailable")
+        return 0
 
 
 app = create_app(os.getenv("STORE_INTEL_DB_PATH", "data/store_intel.db"))

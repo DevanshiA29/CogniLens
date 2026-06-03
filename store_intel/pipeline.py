@@ -4,8 +4,6 @@ from pathlib import Path
 from typing import Any
 import logging
 
-import pandas as pd
-
 from store_intel.agents.event_generator import EventGeneratorAgent
 from store_intel.agents.frame_analyzer import FrameAnalyzerAgent
 from store_intel.agents.input_agent import InputAgent
@@ -87,6 +85,8 @@ class StoreIntelligencePipeline:
         path = Path(pos_path)
         if not path.exists():
             return
+        import pandas as pd
+
         data = pd.read_csv(path)
         with self.store.connect() as conn:
             for index, row in data.iterrows():
