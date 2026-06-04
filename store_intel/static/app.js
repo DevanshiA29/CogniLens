@@ -1604,7 +1604,7 @@ processUpload.addEventListener("click", async () => {
       body: formData,
       timeoutMs: REQUEST_TIMEOUT_MS,
     });
-    uploadStatus.textContent = `${result.events_inserted} events processed from ${result.input.duration_sec}s of video.`;
+    uploadStatus.textContent = processedUploadMessage(result);
     showDashboard();
     await refreshAll();
     await refreshSavedReviews();

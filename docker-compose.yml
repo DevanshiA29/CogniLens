@@ -11,7 +11,7 @@ services:
       STORE_INTEL_DB_PATH: /app/data/store_intel.db
       STORE_INTEL_UPLOAD_DIR: /app/uploads
       STORE_INTEL_USE_YOLO: "0"
-      STORE_INTEL_MAX_ANALYSIS_SECONDS: "180"
+      STORE_INTEL_MAX_ANALYSIS_SECONDS: "24"
     healthcheck:
       test:
         [

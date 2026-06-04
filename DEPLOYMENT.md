@@ -19,7 +19,7 @@ Use Render when you want the simplest public URL from a GitHub repository.
      - `STORE_INTEL_DB_PATH=/app/runtime/data/store_intel.db`
      - `STORE_INTEL_UPLOAD_DIR=/app/runtime/uploads`
      - `STORE_INTEL_USE_YOLO=0`
-     - `STORE_INTEL_MAX_ANALYSIS_SECONDS=180`
+     - `STORE_INTEL_MAX_ANALYSIS_SECONDS=24`
    - Persistent disk:
      - Mount path: `/app/runtime`
      - Size: `1 GB` or larger
@@ -29,7 +29,7 @@ After deployment, open the Render URL and click **Use Demo Video**.
 Processing safety on Render:
 
 - Demo processing should complete quickly and return dashboard results.
-- Uploaded videos are bounded by `STORE_INTEL_MAX_ANALYSIS_SECONDS`, so a very long CCTV file produces analytics for the first processing window instead of locking the worker indefinitely.
+- Uploaded videos are bounded by `STORE_INTEL_MAX_ANALYSIS_SECONDS`, so a very long CCTV file produces analytics for the first processing window instead of locking the worker indefinitely. Use `24` seconds on small hosted instances.
 - Browser requests have explicit timeouts and show **Processing Could Not Complete** instead of remaining in an infinite loading loop.
 - Render logs include checkpoints like `[STEP 3/6] Agent [FrameAnalyzerAgent] initiating tool [analyze_video]`.
 

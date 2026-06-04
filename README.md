@@ -1,3 +1,10 @@
+---
+title: CogniLens
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # Agentic Store Intelligence
 
 End-to-end CCTV-to-retail-analytics system with separate agents for input, frame analysis, event generation, event memory, timestamp queries, APIs, and dashboard output.
@@ -63,7 +70,7 @@ Docker details:
   - `STORE_INTEL_DB_PATH=/app/data/store_intel.db`
   - `STORE_INTEL_UPLOAD_DIR=/app/uploads`
   - `STORE_INTEL_USE_YOLO=0`
-  - `STORE_INTEL_MAX_ANALYSIS_SECONDS=180`
+  - `STORE_INTEL_MAX_ANALYSIS_SECONDS=24`
 
 Deployment processing guardrails:
 
