@@ -4,6 +4,8 @@ import json
 import shutil
 import logging
 import os
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,8 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
     query = TimestampQueryAgent(store)
     scorer = AgentScoreAgent(store)
     review_cache: dict[str, dict[str, Any]] = {}
+    video_jobs: dict[str, dict[str, Any]] = {}
+    video_jobs_lock = threading.Lock()
 
     @app.middleware("http")
     async def log_requests(request, call_next):
@@ -79,21 +83,55 @@ def create_app(db_path: str | Path = "data/store_intel.db") -> FastAPI:
         file: UploadFile = File(...),
         store_id: str = Form("STORE_BLR_002"),
         camera_id: str = Form("CAM_ENTRY_01"),
+        async_mode: bool = Form(False),
     ) -> dict[str, Any]:
         if not file.filename or Path(file.filename).suffix.lower() != ".mp4":
             raise HTTPException(status_code=400, detail="Please upload a valid MP4 video.")
         upload_dir = Path(os.getenv("STORE_INTEL_UPLOAD_DIR", "uploads"))
-        upload_dir.mkdir(exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
         target = upload_dir / Path(file.filename).name
         with target.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
-        from store_intel.pipeline import StoreIntelligencePipeline
+        if async_mode:
+            job_id = f"JOB_{uuid.uuid4().hex[:12]}"
+            _set_video_job(
+                video_jobs,
+                video_jobs_lock,
+                job_id,
+                {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "store_id": store_id,
+                    "camera_id": camera_id,
+                    "filename": target.name,
+                    "created_at": _utc_now(),
+                    "updated_at": _utc_now(),
+                    "message": "CCTV video accepted. Analytics agents are starting.",
+                },
+            )
+            worker = threading.Thread(
+                target=_process_video_job,
+                args=(video_jobs, video_jobs_lock, job_id, store.db_path, target, store_id, camera_id),
+                daemon=True,
+            )
+            worker.start()
+            logging.info("video_job.queued", extra={"job_id": job_id, "store_id": store_id, "camera_id": camera_id})
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "store_id": store_id,
+                "camera_id": camera_id,
+                "message": "Upload received. Processing continues in the background.",
+            }
+        return _run_uploaded_video(store.db_path, target, store_id, camera_id)
 
-        pipeline = StoreIntelligencePipeline(store.db_path)
-        try:
-            return pipeline.process_video(target, store_id, camera_id, replace_store=True)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    @app.get("/videos/jobs/{job_id}")
+    def video_job_status(job_id: str) -> dict[str, Any]:
+        with video_jobs_lock:
+            job = dict(video_jobs.get(job_id) or {})
+        if not job:
+            raise HTTPException(status_code=404, detail="Video processing job was not found.")
+        return job
 
     @app.post("/videos/local")
     def process_local(payload: dict[str, Any]) -> dict[str, Any]:
@@ -328,6 +366,81 @@ def _safe_event_count(store: MemoryEventStoreAgent) -> int:
     except Exception:
         logging.exception("health.event_count_unavailable")
         return 0
+
+
+def _run_uploaded_video(db_path: str | Path, target: Path, store_id: str, camera_id: str) -> dict[str, Any]:
+    from store_intel.pipeline import StoreIntelligencePipeline
+
+    pipeline = StoreIntelligencePipeline(db_path)
+    try:
+        return pipeline.process_video(target, store_id, camera_id, replace_store=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _process_video_job(
+    video_jobs: dict[str, dict[str, Any]],
+    video_jobs_lock: threading.Lock,
+    job_id: str,
+    db_path: str | Path,
+    target: Path,
+    store_id: str,
+    camera_id: str,
+) -> None:
+    _set_video_job(
+        video_jobs,
+        video_jobs_lock,
+        job_id,
+        {
+            "status": "processing",
+            "updated_at": _utc_now(),
+            "message": "Analyzing CCTV frames and generating retail insights.",
+        },
+    )
+    try:
+        result = _run_uploaded_video(db_path, target, store_id, camera_id)
+    except Exception as exc:
+        logging.exception("video_job.failed", extra={"job_id": job_id, "store_id": store_id})
+        _set_video_job(
+            video_jobs,
+            video_jobs_lock,
+            job_id,
+            {
+                "status": "failed",
+                "updated_at": _utc_now(),
+                "message": str(exc),
+                "error": str(exc),
+            },
+        )
+        return
+    _set_video_job(
+        video_jobs,
+        video_jobs_lock,
+        job_id,
+        {
+            "status": "completed",
+            "updated_at": _utc_now(),
+            "message": "Processing complete. Retail insights are ready.",
+            "result": result,
+        },
+    )
+    logging.info("video_job.completed", extra={"job_id": job_id, "store_id": store_id, "events": result.get("events_inserted")})
+
+
+def _set_video_job(
+    video_jobs: dict[str, dict[str, Any]],
+    video_jobs_lock: threading.Lock,
+    job_id: str,
+    updates: dict[str, Any],
+) -> None:
+    with video_jobs_lock:
+        current = dict(video_jobs.get(job_id) or {"job_id": job_id})
+        current.update(updates)
+        video_jobs[job_id] = current
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _review_signature(store_id: str, video: dict[str, Any], events: list[dict[str, Any]]) -> str:

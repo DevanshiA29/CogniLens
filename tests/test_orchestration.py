@@ -67,6 +67,7 @@ def test_fallback_summary_is_json_compatible():
 
 def test_pipeline_caps_long_video_metadata(monkeypatch):
     monkeypatch.setenv("STORE_INTEL_MAX_ANALYSIS_SECONDS", "4")
+    monkeypatch.setenv("STORE_INTEL_CHUNK_SECONDS", "3")
     metadata = {
         "video_id": "VID_TEST",
         "duration_sec": 12,
@@ -76,6 +77,32 @@ def test_pipeline_caps_long_video_metadata(monkeypatch):
     capped = StoreIntelligencePipeline._cap_metadata_duration(metadata)
 
     assert capped["duration_sec"] == 4
+    assert capped["analysis_duration_sec"] == 4
     assert capped["original_duration_sec"] == 12
     assert capped["analysis_capped"] is True
-    assert capped["chunks"] == ["0-1s", "1-2s", "2-3s", "3-4s"]
+    assert capped["analysis_chunks"] == [
+        {"start_sec": 0, "end_sec": 3, "duration_sec": 3},
+        {"start_sec": 3, "end_sec": 4, "duration_sec": 1},
+    ]
+    assert capped["chunks"] == ["0-3s", "3-4s"]
+
+
+def test_pipeline_fragments_full_video_without_total_cap(monkeypatch):
+    monkeypatch.setenv("STORE_INTEL_MAX_ANALYSIS_SECONDS", "0")
+    monkeypatch.setenv("STORE_INTEL_CHUNK_SECONDS", "300")
+    metadata = {
+        "video_id": "VID_LONG",
+        "duration_sec": 725,
+        "chunks": [],
+    }
+
+    prepared = StoreIntelligencePipeline._prepare_analysis_metadata(metadata)
+
+    assert prepared["duration_sec"] == 725
+    assert prepared["analysis_duration_sec"] == 725
+    assert "analysis_capped" not in prepared
+    assert prepared["analysis_chunks"] == [
+        {"start_sec": 0, "end_sec": 300, "duration_sec": 300},
+        {"start_sec": 300, "end_sec": 600, "duration_sec": 300},
+        {"start_sec": 600, "end_sec": 725, "duration_sec": 125},
+    ]

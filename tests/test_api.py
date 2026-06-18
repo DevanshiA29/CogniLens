@@ -1,3 +1,5 @@
+import time
+
 from fastapi.testclient import TestClient
 
 from store_intel.api.app import create_app
@@ -184,6 +186,36 @@ def test_upload_processes_mp4_and_replaces_store_events(tmp_path):
     assert response.json()["events_inserted"] > 0
     timeline_range = client.get("/stores/STORE_BLR_002/timeline/range").json()
     assert timeline_range["start_timestamp"] == "2026-03-03T14:22:10Z"
+
+
+def test_async_upload_returns_job_and_completes(tmp_path):
+    client = TestClient(create_app(db_path=tmp_path / "events.db"))
+    video = create_demo_video(tmp_path / "demo.mp4", duration_sec=2, fps=5)
+
+    with video.open("rb") as handle:
+        response = client.post(
+            "/videos/upload",
+            data={"store_id": "STORE_BLR_002", "camera_id": "CAM_ENTRY_01", "async_mode": "true"},
+            files={"file": ("demo.mp4", handle, "video/mp4")},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["job_id"].startswith("JOB_")
+
+    job = None
+    for _ in range(20):
+        status = client.get(f"/videos/jobs/{body['job_id']}")
+        assert status.status_code == 200
+        job = status.json()
+        if job["status"] == "completed":
+            break
+        time.sleep(0.1)
+
+    assert job is not None
+    assert job["status"] == "completed"
+    assert job["result"]["events_inserted"] > 0
 
 
 def test_processed_video_is_available_for_preview(tmp_path):

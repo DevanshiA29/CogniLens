@@ -49,7 +49,7 @@ class StoreIntelligencePipeline:
                 inputs=json_state(video_path=str(video_path), store_id=store_id, camera_id=camera_id),
                 run=lambda: self.input_agent.inspect_video(video_path, store_id, camera_id, timestamp_offset),
             )
-            metadata = self._cap_metadata_duration(metadata)
+            metadata = self._prepare_analysis_metadata(metadata)
             layout = telemetry_step(
                 state,
                 step=2,
@@ -65,7 +65,13 @@ class StoreIntelligencePipeline:
                 total=total_steps,
                 agent="FrameAnalyzerAgent",
                 tool="analyze_video",
-                inputs=json_state(video_id=metadata["video_id"], duration_sec=metadata["duration_sec"], layout_name=layout.get("layout_name")),
+                inputs=json_state(
+                    video_id=metadata["video_id"],
+                    duration_sec=metadata["duration_sec"],
+                    analysis_duration_sec=metadata.get("analysis_duration_sec", metadata["duration_sec"]),
+                    analysis_chunks=metadata.get("analysis_chunks", []),
+                    layout_name=layout.get("layout_name"),
+                ),
                 run=lambda: self.analyzer.analyze_video(metadata, layout),
             )
             events = telemetry_step(
@@ -146,7 +152,13 @@ class StoreIntelligencePipeline:
         return results
 
     def run_demo(self, store_id: str = "STORE_BLR_002", camera_id: str = "CAM_ENTRY_01", duration_sec: int = 8, fps: int = 10) -> dict[str, Any]:
-        video_path = create_demo_video(Path("samples") / "demo_cctv.mp4", duration_sec=duration_sec, fps=fps)
+        video_path = Path("samples") / "demo_cctv.mp4"
+        force_synthetic = os.getenv("STORE_INTEL_FORCE_SYNTHETIC_DEMO") == "1"
+        if force_synthetic:
+            video_path = Path(os.getenv("STORE_INTEL_SYNTHETIC_DEMO_PATH", "runtime/demo_synthetic.mp4"))
+            video_path = create_demo_video(video_path, duration_sec=duration_sec, fps=fps)
+        elif not video_path.exists() or video_path.stat().st_size == 0:
+            video_path = create_demo_video(video_path, duration_sec=duration_sec, fps=fps)
         return self.process_video(video_path, store_id, camera_id)
 
     def _load_pos_transactions(self, pos_path: str | Path | None, store_id: str) -> None:
@@ -173,15 +185,27 @@ class StoreIntelligencePipeline:
 
     @staticmethod
     def _cap_metadata_duration(metadata: dict[str, Any]) -> dict[str, Any]:
-        max_seconds = int(os.getenv("STORE_INTEL_MAX_ANALYSIS_SECONDS", "180"))
+        return StoreIntelligencePipeline._prepare_analysis_metadata(metadata)
+
+    @staticmethod
+    def _prepare_analysis_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        max_seconds = int(os.getenv("STORE_INTEL_MAX_ANALYSIS_SECONDS", "0"))
+        chunk_seconds = max(int(os.getenv("STORE_INTEL_CHUNK_SECONDS", "300")), 1)
         duration = int(metadata.get("duration_sec") or 0)
+        analysis_duration = duration if max_seconds <= 0 else min(duration, max_seconds)
+        prepared = dict(metadata)
+        prepared["analysis_duration_sec"] = analysis_duration
+        prepared["analysis_chunk_sec"] = chunk_seconds
+        prepared["analysis_chunks"] = StoreIntelligencePipeline._analysis_chunks(analysis_duration, chunk_seconds)
+        prepared["chunks"] = [
+            f"{chunk['start_sec']}-{chunk['end_sec']}s"
+            for chunk in prepared["analysis_chunks"]
+        ]
         if max_seconds <= 0 or duration <= max_seconds:
-            return metadata
-        capped = dict(metadata)
-        capped["original_duration_sec"] = duration
-        capped["duration_sec"] = max_seconds
-        capped["chunks"] = [f"{second}-{second + 1}s" for second in range(max_seconds)]
-        capped["analysis_capped"] = True
+            return prepared
+        prepared["original_duration_sec"] = duration
+        prepared["duration_sec"] = max_seconds
+        prepared["analysis_capped"] = True
         print(
             f"[STEP 1/6] Agent [InputAgent] capped analysis window from {duration}s to {max_seconds}s",
             flush=True,
@@ -190,7 +214,17 @@ class StoreIntelligencePipeline:
             "pipeline.analysis_duration_capped",
             extra={"video_id": metadata.get("video_id"), "original_duration_sec": duration, "duration_sec": max_seconds},
         )
-        return capped
+        return prepared
+
+    @staticmethod
+    def _analysis_chunks(duration_sec: int, chunk_seconds: int) -> list[dict[str, int]]:
+        if duration_sec <= 0:
+            return []
+        chunks: list[dict[str, int]] = []
+        for start in range(0, duration_sec, chunk_seconds):
+            end = min(start + chunk_seconds, duration_sec)
+            chunks.append({"start_sec": start, "end_sec": end, "duration_sec": end - start})
+        return chunks
 
     @staticmethod
     def _camera_id_from_name(path: Path, index: int) -> str:

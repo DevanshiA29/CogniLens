@@ -70,12 +70,17 @@ Docker details:
   - `STORE_INTEL_DB_PATH=/app/data/store_intel.db`
   - `STORE_INTEL_UPLOAD_DIR=/app/uploads`
   - `STORE_INTEL_USE_YOLO=0`
-  - `STORE_INTEL_MAX_ANALYSIS_SECONDS=24`
+  - `STORE_INTEL_MAX_ANALYSIS_SECONDS=0`
+  - `STORE_INTEL_CHUNK_SECONDS=300`
+  - `STORE_INTEL_ANALYSIS_WIDTH=960`
+  - `STORE_INTEL_FRAME_SAMPLE_SECONDS=1`
 
 Deployment processing guardrails:
 
 - Browser requests abort with a clear message instead of staying in an infinite processing state.
-- The backend caps each uploaded video analysis window with `STORE_INTEL_MAX_ANALYSIS_SECONDS`; raise this value on larger paid Render instances if you want deeper clips.
+- The backend processes uploaded videos in `STORE_INTEL_CHUNK_SECONDS` windows. The default `300` seconds means long CCTV clips are analyzed in 5-minute fragments and then stitched into one timeline. `STORE_INTEL_MAX_ANALYSIS_SECONDS=0` means process the full video; set it to a positive value only when you intentionally want a safety cap.
+- `STORE_INTEL_ANALYSIS_WIDTH=960` keeps hosted CPU processing responsive by analyzing resized frames and mapping observations back onto the original video coordinates.
+- `STORE_INTEL_FRAME_SAMPLE_SECONDS=1` samples one representative frame per video second, giving second-by-second annotations without full-frame-rate processing cost.
 - Container logs print orchestration checkpoints like `[STEP 3/6] Agent [FrameAnalyzerAgent] initiating tool [analyze_video]`.
 
 Useful checks after startup:

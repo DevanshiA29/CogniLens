@@ -76,8 +76,11 @@ const overlayColors = {
 
 const fmt = (value) => value.toISOString().replace(".000Z", "Z");
 const storeId = () => storeInput.value.trim() || "STORE_BLR_002";
-const REQUEST_TIMEOUT_MS = 180000;
+const REQUEST_TIMEOUT_MS = 60000;
 const DEMO_TIMEOUT_MS = 60000;
+const UPLOAD_START_TIMEOUT_MS = 5 * 60 * 1000;
+const VIDEO_JOB_TIMEOUT_MS = 30 * 60 * 1000;
+const VIDEO_JOB_POLL_MS = 2500;
 
 async function getJson(url, options = {}) {
   const timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
@@ -90,7 +93,7 @@ async function getJson(url, options = {}) {
     response = await fetch(url, fetchOptions);
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error(`Processing timed out after ${Math.round(timeoutMs / 1000)}s. Try a shorter clip or run the demo video.`);
+      throw new Error(`The request timed out after ${Math.round(timeoutMs / 1000)}s. The hosted server may still be busy; please retry once the Space is fully awake.`);
     }
     throw error;
   } finally {
@@ -101,6 +104,27 @@ async function getJson(url, options = {}) {
     throw new Error(text || `Request failed with status ${response.status}`);
   }
   return response.json();
+}
+
+const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+async function pollVideoJob(jobId) {
+  const startedAt = Date.now();
+  let lastStatus = "";
+  while (Date.now() - startedAt < VIDEO_JOB_TIMEOUT_MS) {
+    const job = await getJson(`/videos/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 15000 });
+    if (job.message && job.message !== lastStatus) {
+      uploadStatus.textContent = job.message;
+      setSystemStatus(job.message, "processing");
+      lastStatus = job.message;
+    }
+    if (job.status === "completed") return job.result || job;
+    if (job.status === "failed") {
+      throw new Error(job.error || job.message || "Video processing failed.");
+    }
+    await sleep(VIDEO_JOB_POLL_MS);
+  }
+  throw new Error("Processing is still running after 30 minutes. Try a smaller MP4 or restart the Space before retrying.");
 }
 
 function metric(label, value, status = "neutral", helper = "") {
@@ -155,6 +179,21 @@ function revenueOpportunity(metrics, funnel) {
 
 function money(value) {
   return `₹${Math.round(value).toLocaleString("en-IN")}`;
+}
+
+function processedUploadMessage(result = {}) {
+  const input = result.input || {};
+  const events = Number(result.events_inserted ?? result.events_generated ?? 0);
+  const duration = Number(input.original_duration_sec || input.duration_sec || 0);
+  const analyzed = Number(input.analysis_duration_sec || input.duration_sec || duration);
+  const chunks = Array.isArray(input.analysis_chunks) ? input.analysis_chunks.length : 0;
+  const visitorCount = Number(result.metrics?.unique_visitors || 0);
+  const eventText = events === 1 ? "1 retail event" : `${events} retail events`;
+  const visitorText = visitorCount === 1 ? "1 visitor" : `${visitorCount} visitors`;
+  const durationText = duration ? ` across ${duration}s of video` : "";
+  const chunkText = chunks > 1 ? ` in ${chunks} processing chunks` : "";
+  const analyzedText = duration && analyzed < duration ? `; analyzed first ${analyzed}s` : "";
+  return `Processing complete: ${eventText} generated for ${visitorText}${durationText}${chunkText}${analyzedText}.`;
 }
 
 function setSystemStatus(text, state = "ready") {
@@ -598,6 +637,20 @@ function observationInsightForEvent(event) {
   return { text: `Customer Activity in ${zoneLabel(zone)}`, kind: "customer", event };
 }
 
+function impactObservationLabel(event) {
+  const insight = insightForEvent(event, [event]) || observationInsightForEvent(event);
+  if (insight) return { text: insight.text, color: insightColor(insight.kind), kind: insight.kind };
+  const zone = String(event.zone_id || event.zone || "").toUpperCase();
+  const isStaff = Boolean(event.is_staff || event.role === "staff");
+  if (isStaff) return { text: `Employee Available: ${zoneLabel(zone)}`, color: overlayColors.employee, kind: "employee" };
+  if (["WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY", "PREMIUM"].includes(zone)) {
+    return { text: `Browsing ${retailMerchandiseLabel(zone)}`, color: overlayColors.product, kind: "product" };
+  }
+  if (zone === "BILLING") return { text: "Customer Near Checkout", color: overlayColors.checkout, kind: "checkout" };
+  if (["ENTRY", "EXIT"].includes(zone)) return { text: "Customer Movement Near Entrance", color: overlayColors.customer, kind: "customer" };
+  return { text: "Customer Movement Observed", color: overlayColors.customer, kind: "customer" };
+}
+
 function fallbackObservation(events) {
   const candidates = (events || [])
     .map((event) => {
@@ -662,6 +715,7 @@ function retailInsights(events, { rateLimit = false } = {}) {
 
 function eventBusinessLabel(event, groupSize = 0) {
   if (event._insightText) return { text: event._insightText, color: insightColor(event._insightKind), kind: event._insightKind };
+  return impactObservationLabel(event);
   const zone = zoneLabel(event.zone_id || event.zone);
   if (event.event_type === "ENTRY") {
     return { text: `Entry • ${event.is_staff || event.role === "staff" ? `Employee #${roleNumber(event)}` : `Customer #${roleNumber(event)}`}`, color: overlayColors.customer, kind: event.is_staff || event.role === "staff" ? "employee" : "customer" };
@@ -1595,15 +1649,20 @@ processUpload.addEventListener("click", async () => {
   formData.append("file", file);
   formData.append("store_id", storeId());
   formData.append("camera_id", "CAM_UPLOAD_01");
+  formData.append("async_mode", "true");
   setProcessingState("Processing uploaded CCTV through the analytics agents...");
   processUpload.disabled = true;
-  uploadStatus.textContent = "Processing video through input, analyzer, event, memory, and API agents...";
+  uploadStatus.textContent = "Uploading CCTV and starting the analytics agents...";
   try {
-    const result = await getJson("/videos/upload", {
+    let result = await getJson("/videos/upload", {
       method: "POST",
       body: formData,
-      timeoutMs: REQUEST_TIMEOUT_MS,
+      timeoutMs: UPLOAD_START_TIMEOUT_MS,
     });
+    if (result.status === "queued" && result.job_id) {
+      uploadStatus.textContent = "Upload received. Processing continues in the background...";
+      result = await pollVideoJob(result.job_id);
+    }
     uploadStatus.textContent = processedUploadMessage(result);
     showDashboard();
     await refreshAll();

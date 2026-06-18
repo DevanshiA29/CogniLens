@@ -31,7 +31,13 @@ class FrameAnalyzerAgent:
 
         fps = max(float(capture.get(cv2.CAP_PROP_FPS) or metadata.get("fps") or 15), 1.0)
         total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        duration_sec = int(round(total_frames / fps)) if total_frames else int(metadata.get("duration_sec", 0))
+        detected_duration_sec = int(round(total_frames / fps)) if total_frames else int(metadata.get("duration_sec", 0))
+        requested_duration_sec = int(metadata.get("analysis_duration_sec") or metadata.get("duration_sec") or detected_duration_sec or 0)
+        duration_sec = min(detected_duration_sec or requested_duration_sec, requested_duration_sec)
+        sample_seconds = max(int(os.getenv("STORE_INTEL_FRAME_SAMPLE_SECONDS", "1")), 1)
+        analysis_chunks = metadata.get("analysis_chunks") or [
+            {"start_sec": 0, "end_sec": duration_sec, "duration_sec": duration_sec}
+        ]
         observations: list[dict[str, Any]] = []
         previous_zones: dict[str, str] = {}
         previous_present: set[str] = set()
@@ -42,97 +48,111 @@ class FrameAnalyzerAgent:
         track_first_zone: dict[int, str] = {}
         track_first_center: dict[int, tuple[float, float]] = {}
 
-        for second in range(duration_sec):
-            capture.set(cv2.CAP_PROP_POS_FRAMES, int(second * fps))
-            ok, frame = capture.read()
-            if not ok:
-                continue
-            detections = self._detect_people(frame)
-            if not detections:
-                detections = self._fallback_motion_people(frame, second)
-            detections = self._add_service_zone_people(detections, frame, layout)
-            detections = self._filter_person_like_detections(detections, frame)
-            detections = self._remove_probable_reflections(detections, frame.shape)
-            group_ids = self.group_detector.assign_groups(detections, frame.shape, second)
-            timestamp = normalize_timestamp(parse_timestamp(metadata["timestamp_offset"]) + timedelta(seconds=second))
-            current_present: set[str] = set()
-            for detection in detections:
-                track_id = int(detection["track_id"])
-                track_seen_seconds[track_id] = track_seen_seconds.get(track_id, 0) + 1
-                visitor_id = self._visitor_id(metadata["camera_id"], track_id)
-                current_present.add(visitor_id)
-                zone = self._zone_for_bbox(detection["bbox"], frame.shape, layout)
-                center = self._normalized_center(detection["bbox"], frame.shape)
-                track_first_zone.setdefault(track_id, zone)
-                track_first_center.setdefault(track_id, center)
-                movement_ratio = self._center_distance(track_first_center[track_id], center)
-                role, role_confidence = self.staff_classifier.classify(
-                    zone,
-                    detection,
-                    track_seen_seconds[track_id],
-                    set(layout.get("staff_service_zones") or layout.get("staff_zones", [])),
-                    track_first_zone.get(track_id),
-                    movement_ratio,
-                )
-                is_staff = role == "staff" or self._is_staff(zone, detection["bbox"], frame.shape, layout)
-                if is_staff:
-                    role = "staff"
-                track_last_detection[visitor_id] = detection
-                track_last_role[visitor_id] = (role, is_staff)
-                previous_streak_zone, previous_streak_count = track_zone_streak.get(track_id, (zone, 0))
-                zone_streak = previous_streak_count + 1 if previous_streak_zone == zone else 1
-                track_zone_streak[track_id] = (zone, zone_streak)
-                entry_zone = self._entry_zone(zone, layout)
-                if visitor_id not in previous_present:
-                    observations.append(self._obs(metadata, timestamp, second, visitor_id, "entered_store", entry_zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
-                previous_zone = previous_zones.get(visitor_id)
-                if previous_zone and previous_zone != zone:
-                    observations.append(self._obs(metadata, timestamp, second, visitor_id, "zone_exit", previous_zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
-                    observations.append(self._obs(metadata, timestamp, second, visitor_id, "zone_enter", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
-                elif not previous_zone:
-                    observations.append(self._obs(metadata, timestamp, second, visitor_id, "zone_enter", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
-                if zone in set(layout.get("checkout_zones", ["BILLING"])) and not is_staff:
-                    observations.append(self._obs(metadata, timestamp, second, visitor_id, "checkout_visit", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
-                if zone in set(layout.get("product_zones", [])) and not is_staff and (zone_streak == 1 or zone_streak % 2 == 0):
-                    interaction = self._obs(metadata, timestamp, second, visitor_id, "product_interaction", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence)
-                    interaction["dwell_ms"] = zone_streak * 1000
-                    interaction["metadata"]["evidence"] = {
-                        "rule": "mapped_product_zone_presence",
-                        "zone_streak_sec": zone_streak,
-                        "video_time_sec": second,
-                    }
-                    observations.append(interaction)
-                dwell_observation = self._obs(metadata, timestamp, second, visitor_id, "zone_dwell", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence)
-                dwell_observation["dwell_ms"] = 1000
-                dwell_observation["metadata"]["per_second"] = True
-                observations.append(dwell_observation)
-                previous_zones[visitor_id] = zone
-            for visitor_id in previous_present - current_present:
-                exit_role, exit_is_staff = track_last_role.get(visitor_id, ("customer", False))
-                last_zone = previous_zones.get(visitor_id)
-                if not self._should_emit_exit(last_zone, layout):
+        for chunk_index, chunk in enumerate(analysis_chunks, start=1):
+            start_second = min(max(int(chunk.get("start_sec", 0)), 0), duration_sec)
+            end_second = min(max(int(chunk.get("end_sec", start_second)), start_second), duration_sec)
+            print(
+                f"[CHUNK {chunk_index}/{len(analysis_chunks)}] FrameAnalyzerAgent analyzing {start_second}-{end_second}s",
+                flush=True,
+            )
+            logging.info(
+                "frame_analyzer.chunk_start",
+                extra={"video_id": metadata.get("video_id"), "chunk": chunk_index, "start_sec": start_second, "end_sec": end_second},
+            )
+            for second in range(start_second, end_second, sample_seconds):
+                capture.set(cv2.CAP_PROP_POS_FRAMES, int(second * fps))
+                ok, frame = capture.read()
+                if not ok:
                     continue
-                exit_metadata = {"source": "tracker_absence"}
-                if visitor_id in track_last_detection:
-                    exit_metadata["bbox"] = track_last_detection[visitor_id].get("bbox")
-                    exit_metadata["last_seen_bbox"] = track_last_detection[visitor_id].get("bbox")
-                observations.append(
-                    {
-                        "store_id": metadata["store_id"],
-                        "camera_id": metadata["camera_id"],
-                        "timestamp": timestamp,
-                        "visitor_id": visitor_id,
-                        "action": "exited_store",
-                        "zone": self._exit_zone(previous_zones.get(visitor_id), layout),
-                        "is_staff": exit_is_staff,
-                        "confidence": 0.72,
-                        "video_time_sec": second,
-                        "frame_id": int(second * fps),
-                        "role": exit_role,
-                        "metadata": exit_metadata,
-                    }
-                )
-            previous_present = current_present
+                analysis_frame, scale_x, scale_y = self._analysis_frame(frame)
+                detections = self._detect_people(analysis_frame)
+                if not detections:
+                    detections = self._fallback_motion_people(analysis_frame, second)
+                detections = self._add_service_zone_people(detections, analysis_frame, layout)
+                detections = self._filter_person_like_detections(detections, analysis_frame)
+                detections = self._remove_probable_reflections(detections, analysis_frame.shape)
+                detections = self._scale_detections(detections, scale_x, scale_y)
+                group_ids = self.group_detector.assign_groups(detections, frame.shape, second)
+                timestamp = normalize_timestamp(parse_timestamp(metadata["timestamp_offset"]) + timedelta(seconds=second))
+                current_present: set[str] = set()
+                for detection in detections:
+                    track_id = int(detection["track_id"])
+                    track_seen_seconds[track_id] = track_seen_seconds.get(track_id, 0) + 1
+                    visitor_id = self._visitor_id(metadata["camera_id"], track_id)
+                    current_present.add(visitor_id)
+                    zone = self._zone_for_bbox(detection["bbox"], frame.shape, layout)
+                    center = self._normalized_center(detection["bbox"], frame.shape)
+                    track_first_zone.setdefault(track_id, zone)
+                    track_first_center.setdefault(track_id, center)
+                    movement_ratio = self._center_distance(track_first_center[track_id], center)
+                    role, role_confidence = self.staff_classifier.classify(
+                        zone,
+                        detection,
+                        track_seen_seconds[track_id],
+                        set(layout.get("staff_service_zones") or layout.get("staff_zones", [])),
+                        track_first_zone.get(track_id),
+                        movement_ratio,
+                    )
+                    is_staff = role == "staff" or self._is_staff(zone, detection["bbox"], frame.shape, layout)
+                    if is_staff:
+                        role = "staff"
+                    track_last_detection[visitor_id] = detection
+                    track_last_role[visitor_id] = (role, is_staff)
+                    previous_streak_zone, previous_streak_count = track_zone_streak.get(track_id, (zone, 0))
+                    zone_streak = previous_streak_count + 1 if previous_streak_zone == zone else 1
+                    track_zone_streak[track_id] = (zone, zone_streak)
+                    entry_zone = self._entry_zone(zone, layout)
+                    if visitor_id not in previous_present:
+                        observations.append(self._obs(metadata, timestamp, second, visitor_id, "entered_store", entry_zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
+                    previous_zone = previous_zones.get(visitor_id)
+                    if previous_zone and previous_zone != zone:
+                        observations.append(self._obs(metadata, timestamp, second, visitor_id, "zone_exit", previous_zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
+                        observations.append(self._obs(metadata, timestamp, second, visitor_id, "zone_enter", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
+                    elif not previous_zone:
+                        observations.append(self._obs(metadata, timestamp, second, visitor_id, "zone_enter", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
+                    if zone in set(layout.get("checkout_zones", ["BILLING"])) and not is_staff:
+                        observations.append(self._obs(metadata, timestamp, second, visitor_id, "checkout_visit", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence))
+                    if zone in set(layout.get("product_zones", [])) and not is_staff and (zone_streak == 1 or zone_streak % 2 == 0):
+                        interaction = self._obs(metadata, timestamp, second, visitor_id, "product_interaction", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence)
+                        interaction["dwell_ms"] = zone_streak * 1000
+                        interaction["metadata"]["evidence"] = {
+                            "rule": "mapped_product_zone_presence",
+                            "zone_streak_sec": zone_streak,
+                            "video_time_sec": second,
+                            "frame_sampling": f"1 frame every {sample_seconds}s",
+                        }
+                        observations.append(interaction)
+                    dwell_observation = self._obs(metadata, timestamp, second, visitor_id, "zone_dwell", zone, is_staff, detection, group_ids.get(track_id), role, role_confidence)
+                    dwell_observation["dwell_ms"] = 1000
+                    dwell_observation["metadata"]["per_second"] = True
+                    observations.append(dwell_observation)
+                    previous_zones[visitor_id] = zone
+                for visitor_id in previous_present - current_present:
+                    exit_role, exit_is_staff = track_last_role.get(visitor_id, ("customer", False))
+                    last_zone = previous_zones.get(visitor_id)
+                    if not self._should_emit_exit(last_zone, layout):
+                        continue
+                    exit_metadata = {"source": "tracker_absence"}
+                    if visitor_id in track_last_detection:
+                        exit_metadata["bbox"] = track_last_detection[visitor_id].get("bbox")
+                        exit_metadata["last_seen_bbox"] = track_last_detection[visitor_id].get("bbox")
+                    observations.append(
+                        {
+                            "store_id": metadata["store_id"],
+                            "camera_id": metadata["camera_id"],
+                            "timestamp": timestamp,
+                            "visitor_id": visitor_id,
+                            "action": "exited_store",
+                            "zone": self._exit_zone(previous_zones.get(visitor_id), layout),
+                            "is_staff": exit_is_staff,
+                            "confidence": 0.72,
+                            "video_time_sec": second,
+                            "frame_id": int(second * fps),
+                            "role": exit_role,
+                            "metadata": exit_metadata,
+                        }
+                    )
+                previous_present = current_present
 
         capture.release()
         logging.info("frame_analyzer.observations_generated", extra={"video_id": metadata.get("video_id"), "observations": len(observations)})
@@ -151,6 +171,37 @@ class FrameAnalyzerAgent:
             }
             for index, (x, y, w, h) in enumerate(rects[:12])
         ]
+
+    @staticmethod
+    def _analysis_frame(frame: np.ndarray) -> tuple[np.ndarray, float, float]:
+        max_width = int(os.getenv("STORE_INTEL_ANALYSIS_WIDTH", "960"))
+        if max_width <= 0:
+            return frame, 1.0, 1.0
+        height, width = frame.shape[:2]
+        if width <= max_width:
+            return frame, 1.0, 1.0
+        ratio = max_width / max(width, 1)
+        resized_height = max(1, int(round(height * ratio)))
+        resized = cv2.resize(frame, (max_width, resized_height), interpolation=cv2.INTER_AREA)
+        return resized, width / max_width, height / resized_height
+
+    @staticmethod
+    def _scale_detections(detections: list[dict[str, Any]], scale_x: float, scale_y: float) -> list[dict[str, Any]]:
+        if scale_x == 1.0 and scale_y == 1.0:
+            return detections
+        scaled: list[dict[str, Any]] = []
+        for detection in detections:
+            x, y, w, h = detection.get("bbox") or [0, 0, 0, 0]
+            updated = dict(detection)
+            updated["bbox"] = [
+                int(round(x * scale_x)),
+                int(round(y * scale_y)),
+                int(round(w * scale_x)),
+                int(round(h * scale_y)),
+            ]
+            updated["analysis_scaled_from"] = detection.get("bbox")
+            scaled.append(updated)
+        return scaled
 
     def _detect_yolo(self, frame: np.ndarray) -> list[dict[str, Any]]:
         results = self.yolo.track(frame, persist=True, classes=[0], verbose=False)
@@ -446,5 +497,10 @@ class FrameAnalyzerAgent:
                 "model": detection.get("model"),
                 "role_confidence": role_confidence,
                 "annotation_policy": "person_floor_track_not_wall_poster_or_tv",
+                "frame_analysis": {
+                    "sampled_at_video_second": second,
+                    "method": "one_representative_frame_per_second",
+                    "purpose": "fast_business_impact_annotation",
+                },
             },
         }

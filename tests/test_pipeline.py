@@ -8,7 +8,8 @@ from store_intel.agents.staff_classifier import StaffClassifier
 from store_intel.pipeline import StoreIntelligencePipeline
 
 
-def test_pipeline_processes_demo_video_into_events(tmp_path):
+def test_pipeline_processes_demo_video_into_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORE_INTEL_FORCE_SYNTHETIC_DEMO", "1")
     pipeline = StoreIntelligencePipeline(db_path=tmp_path / "events.db")
     result = pipeline.run_demo(
         store_id="STORE_BLR_002",
