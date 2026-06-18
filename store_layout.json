@@ -8,6 +8,31 @@
     "BILLING": { "x1": 0.82, "y1": 0.22, "x2": 0.96, "y2": 0.78 },
     "PMU": { "x1": 0.9, "y1": 0.58, "x2": 1.0, "y2": 0.9 }
   },
+  "mirror_zones": {
+    "ENTRY_MIRROR": {
+      "label": "Mirror / Reflection Area",
+      "points": [
+        [0.132, 0.367],
+        [0.183, 0.355],
+        [0.215, 0.385],
+        [0.217, 0.694],
+        [0.138, 0.704],
+        [0.129, 0.404]
+      ]
+    },
+    "RIGHT_PROMO_MIRROR": {
+      "label": "Mirror / Reflection Area",
+      "points": [
+        [0.612, 0.0],
+        [0.985, 0.0],
+        [0.985, 0.985],
+        [0.71, 0.985],
+        [0.66, 0.82],
+        [0.622, 0.56]
+      ]
+    }
+  },
+  "mirror_overlap_threshold": 0.45,
   "entry_zones": ["ENTRY"],
   "exit_zones": ["EXIT"],
   "product_zones": ["WALL_PRODUCTS", "PRODUCT_AISLE", "CENTER_DISPLAY"],

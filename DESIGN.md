@@ -26,6 +26,7 @@ flowchart LR
 
 - **Input Agent**: validates MP4/local files, extracts video metadata, FPS, duration, timestamp offset, and one-second chunks.
 - **Frame Analyzer Agent**: samples video second-by-second, detects people with YOLO when enabled or OpenCV fallback, tracks ids, zones, staff role hints, groups, and per-second dwell.
+- **Mirror Suppression Layer**: removes person-like detections that fall inside configured mirror/display polygons before visitor ids, sessions, groups, heatmaps, or funnel events are created. Each suppressed detection is logged with the mirror zone id, bbox, overlap ratio, and video second.
 - **Staff Classifier**: explainable heuristic using restricted zones and track persistence; all people are emitted as either `customer` or `staff`.
 - **Group Detector**: assigns `group_id` when visitors are close enough in the same timestamp.
 - **Event Generator Agent**: emits structured events with `event_id`, `timestamp`, `video_time_sec`, `frame_id`, `visitor_id`, `track_id`, `group_id`, `role`, `event_type`, `zone`, `confidence`, and `metadata`.
@@ -39,11 +40,12 @@ flowchart LR
 1. Video is uploaded or demo video is generated.
 2. Input metadata is extracted and passed to the analyzer.
 3. Analyzer emits observations per second.
-4. Event generator converts observations into schema-compliant events.
-5. Store agent deduplicates events, updates visitor sessions, maps track ids to stable visitor ids, updates dwell/group/reentry state, and creates anomaly records.
-6. APIs and dashboard query session-based analytics.
-7. The pipeline passes compact JSON-compatible state between agent stages instead of conversational histories.
-8. The dashboard synchronizes the video, slider, activity timeline, heatmap, and canvas overlay. The overlay prioritizes high-confidence retail insights, then falls back to a per-second observation so every analyzed second remains explainable without showing raw tracker ids.
+4. Mirror/reflection detections are filtered before event generation, using store-layout polygons first and geometric reflection-pair checks as fallback.
+5. Event generator converts observations into schema-compliant events.
+6. Store agent deduplicates events, updates visitor sessions, maps track ids to stable visitor ids, updates dwell/group/reentry state, and creates anomaly records.
+7. APIs and dashboard query session-based analytics.
+8. The pipeline passes compact JSON-compatible state between agent stages instead of conversational histories.
+9. The dashboard synchronizes the video, slider, activity timeline, heatmap, and canvas overlay. The overlay prioritizes high-confidence retail insights, then falls back to a per-second observation so every analyzed second remains explainable without showing raw tracker ids. Mirror/display polygons are drawn as subtle dashed "Mirror / Reflection Area" overlays and never create headcount events.
 
 ## Prompt And Execution Constraints
 

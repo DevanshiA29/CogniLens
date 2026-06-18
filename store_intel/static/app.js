@@ -1189,6 +1189,22 @@ function drawZones(rect) {
     { name: "Center Display", color: "rgba(0,184,74,0.48)", points: [[0.32, 0.34], [0.66, 0.34], [0.66, 0.72], [0.32, 0.72]] },
     { name: "Cash Counter", color: "rgba(255,138,0,0.56)", points: [[0.82, 0.22], [0.96, 0.22], [0.96, 0.78], [0.82, 0.78]] },
     { name: "PMU Service", color: "rgba(255,138,0,0.56)", points: [[0.9, 0.58], [0.99, 0.58], [0.99, 0.9], [0.9, 0.9]] },
+    {
+      name: "Mirror / Reflection Area",
+      color: "rgba(96,165,250,0.72)",
+      fill: "rgba(96,165,250,0.055)",
+      dashed: true,
+      labelPoint: [0.136, 0.39],
+      points: [[0.132, 0.367], [0.183, 0.355], [0.215, 0.385], [0.217, 0.694], [0.138, 0.704], [0.129, 0.404]],
+    },
+    {
+      name: "Mirror / Reflection Area",
+      color: "rgba(96,165,250,0.72)",
+      fill: "rgba(96,165,250,0.052)",
+      dashed: true,
+      labelPoint: [0.63, 0.06],
+      points: [[0.612, 0.0], [0.985, 0.0], [0.985, 0.985], [0.71, 0.985], [0.66, 0.82], [0.622, 0.56]],
+    },
   ];
   overlayCtx.save();
   overlayCtx.font = "11px Inter, system-ui, sans-serif";
@@ -1202,12 +1218,15 @@ function drawZones(rect) {
       else overlayCtx.lineTo(x, y);
     });
     overlayCtx.closePath();
-    overlayCtx.fillStyle = "rgba(255, 255, 255, 0.035)";
+    overlayCtx.fillStyle = zone.fill || "rgba(255, 255, 255, 0.035)";
     overlayCtx.strokeStyle = zone.color || overlayColors.zone;
+    overlayCtx.setLineDash(zone.dashed ? [5, 4] : []);
     overlayCtx.fill();
     overlayCtx.stroke();
+    overlayCtx.setLineDash([]);
     overlayCtx.fillStyle = "rgba(255, 255, 255, 0.76)";
-    overlayCtx.fillText(zone.name, zone.points[0][0] * rect.width + 8, zone.points[0][1] * rect.height + 18);
+    const labelPoint = zone.labelPoint || zone.points[0];
+    overlayCtx.fillText(zone.name, labelPoint[0] * rect.width + 8, labelPoint[1] * rect.height + 18);
   }
   overlayCtx.restore();
 }

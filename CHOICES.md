@@ -18,6 +18,7 @@
 - Orchestration is implemented directly in Python instead of introducing LangGraph/CrewAI as a new dependency. This keeps execution fast, deterministic, and Docker-friendly while preserving the same agent-node concepts.
 - Folder/camera processing is capped at `max_iterations=4` by state, not by model text. If more camera clips are provided, the system returns a fallback summary instead of looping indefinitely.
 - Hosted uploads are capped by `STORE_INTEL_MAX_ANALYSIS_SECONDS` to keep Render workers responsive. This favors a reliable processed sample over an unbounded request that could time out or appear stuck.
+- Mirror handling is hybrid: known store layouts define exact mirror/display polygons, while reflection-pair suppression remains as a fallback for unknown layouts. This is more deployment-ready than pretending to train a mirror detector without a labeled retail CCTV dataset.
 
 ## Why Heuristics
 
@@ -35,6 +36,7 @@ The challenge rewards correct, explainable retail intelligence more than incompl
 
 - Cross-camera identity is approximate unless a stronger appearance model is enabled.
 - Mirror/reflection suppression is geometric and may miss unusual reflective layouts.
+- New camera angles need their mirror/display regions added to `mirror_zones` in the layout file. The backend and canvas overlay both use the same normalized polygon points, so alignment scales with the video player.
 - Staff uniform color is represented as metadata-ready logic but not a trained classifier.
 - Product interactions are inferred from non-entry/non-billing zone dwell in the fallback analyzer.
 - Employee-vs-customer distinction is heuristic unless a stronger trained uniform/appearance model is enabled.

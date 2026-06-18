@@ -70,6 +70,7 @@ class FrameAnalyzerAgent:
                     detections = self._fallback_motion_people(analysis_frame, second)
                 detections = self._add_service_zone_people(detections, analysis_frame, layout)
                 detections = self._filter_person_like_detections(detections, analysis_frame)
+                detections = self._remove_mirror_zone_detections(detections, analysis_frame.shape, layout, second=second)
                 detections = self._remove_probable_reflections(detections, analysis_frame.shape)
                 detections = self._scale_detections(detections, scale_x, scale_y)
                 group_ids = self.group_detector.assign_groups(detections, frame.shape, second)
@@ -357,6 +358,97 @@ class FrameAnalyzerAgent:
             return 0.0
         intersection = (ix2 - ix1) * (iy2 - iy1)
         return intersection / max(min(aw * ah, bw * bh), 1)
+
+    @staticmethod
+    def _remove_mirror_zone_detections(
+        detections: list[dict[str, Any]],
+        shape: tuple[int, ...],
+        layout: dict[str, Any],
+        second: int = 0,
+    ) -> list[dict[str, Any]]:
+        mirror_polygons = FrameAnalyzerAgent._mirror_zone_polygons(layout, shape)
+        if not mirror_polygons:
+            return detections
+        threshold = float(layout.get("mirror_overlap_threshold", 0.45))
+        kept: list[dict[str, Any]] = []
+        for detection in detections:
+            bbox = detection.get("bbox") or [0, 0, 0, 0]
+            match = FrameAnalyzerAgent._matching_mirror_zone(bbox, mirror_polygons, shape, threshold)
+            if match is None:
+                kept.append(detection)
+                continue
+            zone_id, overlap_ratio = match
+            logging.info(
+                "frame_analyzer.mirror_detection_ignored",
+                extra={
+                    "zone_id": zone_id,
+                    "bbox": bbox,
+                    "overlap_ratio": round(overlap_ratio, 3),
+                    "frame_second": second,
+                    "track_id": detection.get("track_id"),
+                },
+            )
+        return kept
+
+    @staticmethod
+    def _mirror_zone_polygons(layout: dict[str, Any], shape: tuple[int, ...]) -> list[tuple[str, np.ndarray]]:
+        height, width = shape[:2]
+        polygons: list[tuple[str, np.ndarray]] = []
+        for zone_id, zone in (layout.get("mirror_zones") or {}).items():
+            if "points" in zone:
+                points = zone["points"]
+            elif {"x1", "y1", "x2", "y2"}.issubset(zone):
+                points = [
+                    [zone["x1"], zone["y1"]],
+                    [zone["x2"], zone["y1"]],
+                    [zone["x2"], zone["y2"]],
+                    [zone["x1"], zone["y2"]],
+                ]
+            else:
+                continue
+            polygon = np.array(
+                [[int(round(float(px) * width)), int(round(float(py) * height))] for px, py in points],
+                dtype=np.int32,
+            )
+            if len(polygon) >= 3:
+                polygons.append((zone_id, polygon))
+        return polygons
+
+    @staticmethod
+    def _matching_mirror_zone(
+        bbox: list[int],
+        mirror_polygons: list[tuple[str, np.ndarray]],
+        shape: tuple[int, ...],
+        threshold: float,
+    ) -> tuple[str, float] | None:
+        x, y, w, h = [int(value) for value in bbox]
+        if w <= 0 or h <= 0:
+            return None
+        center = (float(x + w / 2), float(y + h / 2))
+        best_match: tuple[str, float] | None = None
+        for zone_id, polygon in mirror_polygons:
+            overlap_ratio = FrameAnalyzerAgent._bbox_polygon_overlap_ratio(bbox, polygon, shape)
+            center_inside = cv2.pointPolygonTest(polygon, center, False) >= 0
+            if center_inside or overlap_ratio >= threshold:
+                if best_match is None or overlap_ratio > best_match[1]:
+                    best_match = (zone_id, overlap_ratio)
+        return best_match
+
+    @staticmethod
+    def _bbox_polygon_overlap_ratio(bbox: list[int], polygon: np.ndarray, shape: tuple[int, ...]) -> float:
+        frame_height, frame_width = shape[:2]
+        x, y, w, h = [int(value) for value in bbox]
+        x1, y1 = max(x, 0), max(y, 0)
+        x2, y2 = min(x + w, frame_width), min(y + h, frame_height)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        crop_width, crop_height = x2 - x1, y2 - y1
+        shifted = polygon.copy()
+        shifted[:, 0] -= x1
+        shifted[:, 1] -= y1
+        mask = np.zeros((crop_height, crop_width), dtype=np.uint8)
+        cv2.fillPoly(mask, [shifted], 255)
+        return float(np.count_nonzero(mask)) / max(crop_width * crop_height, 1)
 
     @staticmethod
     def _remove_probable_reflections(detections: list[dict[str, Any]], shape: tuple[int, ...]) -> list[dict[str, Any]]:

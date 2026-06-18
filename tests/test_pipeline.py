@@ -38,6 +38,64 @@ def test_analyzer_removes_probable_mirror_reflections():
     assert [detection["track_id"] for detection in filtered] == [1, 3]
 
 
+def test_analyzer_removes_configured_mirror_zone_detections():
+    layout = InputAgent.default_layout()
+    frame_shape = (540, 960, 3)
+    detections = [
+        {"track_id": 1, "bbox": [132, 220, 64, 185], "confidence": 0.88, "model": "test"},
+        {"track_id": 2, "bbox": [330, 245, 90, 230], "confidence": 0.86, "model": "test"},
+    ]
+
+    filtered = FrameAnalyzerAgent._remove_mirror_zone_detections(detections, frame_shape, layout, second=12)
+
+    assert [detection["track_id"] for detection in filtered] == [2]
+    assert "ENTRY_MIRROR" in layout["mirror_zones"]
+
+
+def test_analyzer_keeps_partial_non_mirror_overlap_detections():
+    layout = InputAgent.default_layout()
+    frame_shape = (540, 960, 3)
+    detections = [
+        {"track_id": 1, "bbox": [200, 245, 90, 230], "confidence": 0.88, "model": "test"},
+    ]
+
+    filtered = FrameAnalyzerAgent._remove_mirror_zone_detections(detections, frame_shape, layout, second=12)
+
+    assert [detection["track_id"] for detection in filtered] == [1]
+
+
+def test_analyzer_removes_right_side_camera_angle_mirror_detections():
+    layout = InputAgent.default_layout()
+    frame_shape = (1080, 1920, 3)
+    detections = [
+        {"track_id": 1, "bbox": [1380, 300, 220, 620], "confidence": 0.9, "model": "test"},
+        {"track_id": 2, "bbox": [900, 260, 170, 610], "confidence": 0.88, "model": "test"},
+    ]
+
+    filtered = FrameAnalyzerAgent._remove_mirror_zone_detections(detections, frame_shape, layout, second=48)
+
+    assert [detection["track_id"] for detection in filtered] == [2]
+    assert "RIGHT_PROMO_MIRROR" in layout["mirror_zones"]
+
+
+def test_mirror_only_detections_do_not_create_headcount_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORE_INTEL_MAX_ANALYSIS_SECONDS", "1")
+    pipeline = StoreIntelligencePipeline(db_path=tmp_path / "events.db")
+    video = tmp_path / "mirror_only.mp4"
+    from store_intel.demo import create_demo_video
+
+    create_demo_video(video, duration_sec=1, fps=5)
+    mirror_detection = [{"track_id": 1, "bbox": [132, 220, 64, 185], "confidence": 0.88, "model": "test"}]
+    monkeypatch.setattr(pipeline.analyzer, "_detect_people", lambda frame: mirror_detection)
+    monkeypatch.setattr(pipeline.analyzer, "_fallback_motion_people", lambda frame, second: [])
+    monkeypatch.setattr(pipeline.analyzer, "_add_service_zone_people", lambda detections, frame, layout: detections)
+
+    result = pipeline.process_video(video, "STORE_BLR_002", "CAM_MIRROR", replace_store=True)
+
+    assert result["events_inserted"] == 0
+    assert result["metrics"]["unique_visitors"] == 0
+
+
 def test_analyzer_rejects_flat_poster_like_people_boxes():
     frame = np.zeros((540, 960, 3), dtype=np.uint8)
     detections = [
