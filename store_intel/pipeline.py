@@ -5,6 +5,8 @@ from typing import Any
 import logging
 import os
 
+import cv2
+
 from store_intel.agents.event_generator import EventGeneratorAgent
 from store_intel.agents.frame_analyzer import FrameAnalyzerAgent
 from store_intel.agents.input_agent import InputAgent
@@ -154,12 +156,40 @@ class StoreIntelligencePipeline:
     def run_demo(self, store_id: str = "STORE_BLR_002", camera_id: str = "CAM_ENTRY_01", duration_sec: int = 8, fps: int = 10) -> dict[str, Any]:
         video_path = Path("samples") / "demo_cctv.mp4"
         force_synthetic = os.getenv("STORE_INTEL_FORCE_SYNTHETIC_DEMO") == "1"
-        if force_synthetic:
+        if force_synthetic or not self._is_usable_video(video_path):
+            if not force_synthetic:
+                logging.warning(
+                    "pipeline.bundled_demo_unusable_falling_back_to_synthetic",
+                    extra={"path": str(video_path)},
+                )
             video_path = Path(os.getenv("STORE_INTEL_SYNTHETIC_DEMO_PATH", "runtime/demo_synthetic.mp4"))
             video_path = create_demo_video(video_path, duration_sec=duration_sec, fps=fps)
-        elif not video_path.exists() or video_path.stat().st_size == 0:
-            video_path = create_demo_video(video_path, duration_sec=duration_sec, fps=fps)
         return self.process_video(video_path, store_id, camera_id)
+
+    @staticmethod
+    def _is_usable_video(path: Path) -> bool:
+        """Return False for missing files, empty files, and unresolved Git LFS pointer
+        stubs (e.g. when the real binary failed to download), not just zero-byte files."""
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        # A real video is always far larger than a text LFS pointer, but check the
+        # pointer signature directly so this also catches small corrupt files.
+        if path.stat().st_size < 4096:
+            try:
+                head = path.read_bytes()[:200]
+                if head.startswith(b"version https://git-lfs.github.com/spec/v1"):
+                    return False
+            except OSError:
+                return False
+        capture = cv2.VideoCapture(str(path))
+        try:
+            if not capture.isOpened():
+                return False
+            frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            fps_value = capture.get(cv2.CAP_PROP_FPS) or 0
+            return frames > 0 and fps_value > 0
+        finally:
+            capture.release()
 
     def _load_pos_transactions(self, pos_path: str | Path | None, store_id: str) -> None:
         if not pos_path:

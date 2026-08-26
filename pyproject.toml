@@ -8,7 +8,7 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic>=2.7",
   "python-multipart>=0.0.9",
-  "opencv-python-headless>=4.9",
+  "opencv-python-headless>=4.9,<5",
   "numpy>=1.26",
   "pandas>=2.2",
 ]
@@ -21,6 +21,9 @@ dev = [
   "pytest>=8.2",
   "httpx>=0.27",
 ]
+
+[tool.setuptools.packages.find]
+include = ["store_intel*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
